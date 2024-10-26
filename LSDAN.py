@@ -1,3 +1,7 @@
+# Check the long short
+# Check the nnPU
+# Create a datsaet generating function (binary labels) with occulting of a certain percentage of the positive class and all negative class
+# Set up an evaluation function
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
