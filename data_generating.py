@@ -166,7 +166,7 @@ if __name__ == "__main__":
                                                  boostrap pu learning')
     parser.add_argument('--dataset', '-d', type=str, default='citeseer',
                         help='Data set to be used')
-    parser.add_argument('--positive_index', '-c', type=list, default=[0,1,2],
+    parser.add_argument('--positive_index', '-c', type=list, default=[0],
                         help='Index of label to be used as positive')
     parser.add_argument('--sample_seed', '-s', type=int, default=1,
                         help='random seed for sample labeled positive from all positive nodes')
