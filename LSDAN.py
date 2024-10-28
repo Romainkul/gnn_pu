@@ -69,24 +69,32 @@ class LongDistanceAttention(nn.Module):
             Ak_list.append(Ak)
 
         n_nodes = X.size(0)
-        attention = torch.zeros(n_nodes, n_nodes)
-        
-        for i in range(n_nodes):
-            for j in range(n_nodes):
-                if Ak[i, j] != 0:  # Consider only neighbors (j in N(i))
-                    # Step 3: Concatenate features of nodes i and j, then compute LeakyReLU(r^T [W^(1)x_i ⊕ W^(1)x_j])
-                    cij = torch.exp(torch.matmul(hk, Wa))
-                    attention[i,j] = cij 
-        
-        # Step 4: Apply softmax to get normalized attention scores (softmax over neighbors of each node)
-        attention = torch.exp(attention)  # Exponential of the computed scores
-        ok=torch.zeros(n_nodes, 1)
-        for i in range(n_nodes):
-            attention[i] /= torch.sum(attention[i][Ak_list[i] != 0])  # Softmax normalization over neighbors
- 
-        for i in range(n_nodes):
-            ok[i] = torch.sum(attention.view(-1, 1, 1) * hk, dim=0)
-        return ok
+        attention = torch.zeros((n_nodes, n_nodes), dtype=torch.float32)
+
+        # Step 3: Calculate attention scores for each pair of nodes based on k-hop neighbors
+        for k, Ak in enumerate(Ak_list):
+            for i in range(n_nodes):
+                for j in range(n_nodes):
+                    if Ak[i, j] != 0:  # Only consider k-hop neighbors
+                        # Concatenate features of nodes i and j, then compute attention score
+                        cij = torch.matmul(hk[i], Wa[j])  # Dot-product attention
+                        attention[i, j] = cij
+
+            # Step 4: Apply softmax normalization for each node's neighbors
+            attention_exp = torch.exp(attention)  # Exponential of attention scores
+            for i in range(n_nodes):
+                attention_exp[i] /= torch.sum(attention_exp[i][Ak[i] != 0])  # Softmax over neighbors
+            
+            # Step 5: Aggregate node features based on attention scores
+            output = torch.zeros((n_nodes, hk.size(1)), dtype=torch.float32)
+            for i in range(n_nodes):
+                neighbors = hk[Ak[i] != 0]  # Select k-hop neighbors for node i
+                weights = attention_exp[i][Ak[i] != 0].view(-1, 1)  # Corresponding attention weights
+                output[i] = torch.sum(weights * neighbors, dim=0)  # Weighted sum for each node
+            
+        # Final transformation
+        final_output = self.output_layer(output)  # Map to final output dimensions
+        return final_output
 
 # Positive-Unlabeled Learning with Risk Estimators
 class PUPositiveUnlabeledLearning(nn.Module):
