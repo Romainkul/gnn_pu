@@ -5,6 +5,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PU_Loss import PULoss
 
 # Short-Distance Attention Mechanism
 class ShortDistanceAttention(nn.Module):
@@ -72,17 +73,19 @@ class LongDistanceAttention(nn.Module):
         
         for i in range(n_nodes):
             for j in range(n_nodes):
-                if A[i, j] != 0:  # Consider only neighbors (j in N(i))
+                if Ak[i, j] != 0:  # Consider only neighbors (j in N(i))
                     # Step 3: Concatenate features of nodes i and j, then compute LeakyReLU(r^T [W^(1)x_i ⊕ W^(1)x_j])
                     cij = torch.exp(torch.matmul(hk, Wa))
+                    attention[i,j] = cij 
         
         # Step 4: Apply softmax to get normalized attention scores (softmax over neighbors of each node)
-        attention = torch.exp(cij)  # Exponential of the computed scores
+        attention = torch.exp(attention)  # Exponential of the computed scores
+        ok=torch.zeros(n_nodes, 1)
         for i in range(n_nodes):
             attention[i] /= torch.sum(attention[i][Ak_list[i] != 0])  # Softmax normalization over neighbors
  
-        ok = torch.sum(attention.view(-1, 1, 1) * hk, dim=0)
-        
+        for i in range(n_nodes):
+            ok[i] = torch.sum(attention.view(-1, 1, 1) * hk, dim=0)
         return ok
 
 # Positive-Unlabeled Learning with Risk Estimators
@@ -98,25 +101,10 @@ class PUPositiveUnlabeledLearning(nn.Module):
         out = torch.sigmoid(self.fc(H))  # Binary classification output
         return out
 
-    def compute_loss(self, out, labels, positive_weight, unlabeled_weight):
-        # Unbiased risk estimator
-        pos_loss = -positive_weight * torch.mean(labels * torch.log(out + 1e-6))
-        unlabeled_loss = -unlabeled_weight * torch.mean((1 - labels) * torch.log(1 - out + 1e-6))
-        return pos_loss + unlabeled_loss
-
-# Example Usage
-n, m, d, num_hops = 10, 5, 4, 3  # Number of nodes, features per node, embedding size, number of hops
-X = torch.rand((n, m))  # Node feature matrix (n nodes, m features)
-A = torch.eye(n)        # Adjacency matrix (1-hop neighbors)
+    def pu_loss(x, t, prior, gamma=1, beta=0, nnpu=True):
+        loss_fn = PULoss(prior=prior, gamma=gamma, beta=beta, nnpu=nnpu)
+        return loss_fn(x, t)
 
 # Model initialization and forward pass
 model = PUPositiveUnlabeledLearning(m, d, num_hops)
-labels = torch.randint(0, 2, (n,))  # Binary labels (1: positive, 0: unlabeled)
-positive_weight, unlabeled_weight = 1.0, 1.0  # Weights for positive and unlabeled samples
-
-# Forward pass and loss computation
-out = model(X, A)
-loss = model.compute_loss(out, labels, positive_weight, unlabeled_weight)
-
-print("Output:\n", out)
-print("Loss:", loss.item())
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
