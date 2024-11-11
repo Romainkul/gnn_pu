@@ -1,104 +1,98 @@
 import torch
+import networkx as nx
+from node2vec import Node2Vec
+import torch
 import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv
 from torch_geometric.utils import to_networkx
-from node2vec import Node2Vec  # Use Node2Vec from an external library
+from node2vec import Node2Vec
 
-class Encoder:
-    def __init__(self, method='GraphSAGE', **kwargs):
+class Node2vecEncoder:
+    def __init__(self, dimensions=64, walk_length=30, num_walks=200, window=10, min_count=1, batch_words=4):
         """
-        Initialize the Encoder class with the specified encoding method.
-        
+        Initialize the Node2Vec encoder with the specified hyperparameters.
+
         Parameters:
-        - method (str): The encoding method to use. Options are 'GraphSAGE' or 'Node2vec'.
-        - kwargs: Hyperparameters specific to the chosen encoding method.
+        - dimensions (int): Size of the embedding vector.
+        - walk_length (int): Length of each random walk.
+        - num_walks (int): Number of random walks per node.
+        - window (int): Maximum distance between the current and predicted node in the context window.
+        - min_count (int): Minimum count of occurrences of words (nodes) to be considered.
+        - batch_words (int): Number of words to process in each batch.
         """
-        self.method = method
-        self.kwargs = kwargs
-        if method == 'GraphSAGE':
-            # Setup for GraphSAGE
-            self.in_channels = kwargs.get('in_channels', 64)
-            self.hidden_channels = kwargs.get('hidden_channels', 128)
-            self.out_channels = kwargs.get('out_channels', 64)
-            self.model = self._init_graphsage()
-        elif method == 'Node2vec':
-            # Setup for Node2vec
-            self.dimensions = kwargs.get('dimensions', 64)
-            self.walk_length = kwargs.get('walk_length', 30)
-            self.num_walks = kwargs.get('num_walks', 200)
-            self.window = kwargs.get('window', 10)
-            self.min_count = kwargs.get('min_count', 1)
-            self.batch_words = kwargs.get('batch_words', 4)
-        else:
-            raise ValueError("Unsupported method. Choose 'GraphSAGE' or 'Node2vec'.")
-
-    def _init_graphsage(self):
-        """
-        Initialize GraphSAGE model with specified layers.
-        """
-        class GraphSAGEModel(torch.nn.Module):
-            def __init__(self, in_channels, hidden_channels, out_channels):
-                super(GraphSAGEModel, self).__init__()
-                self.conv1 = SAGEConv(in_channels, hidden_channels)
-                self.conv2 = SAGEConv(hidden_channels, out_channels)
-            
-            def forward(self, x, edge_index):
-                x = F.relu(self.conv1(x, edge_index))
-                x = self.conv2(x, edge_index)
-                return x
-
-        return GraphSAGEModel(self.in_channels, self.hidden_channels, self.out_channels)
+        self.dimensions = dimensions
+        self.walk_length = walk_length
+        self.num_walks = num_walks
+        self.window = window
+        self.min_count = min_count
+        self.batch_words = batch_words
 
     def fit(self, data):
         """
-        Fit the encoder model to the graph data.
-        
-        Parameters:
-        - data: The input graph data, which should include attributes:
-            - x (node features)
-            - edge_index (graph edges)
-        
-        Returns:
-        - Encoded node embeddings.
-        """
-        if self.method == 'GraphSAGE':
-            return self._fit_graphsage(data)
-        elif self.method == 'Node2vec':
-            return self._fit_node2vec(data)
+        Perform Node2Vec encoding on the input graph data.
 
-    def _fit_graphsage(self, data):
-        """
-        Perform GraphSAGE encoding on the input data.
-        """
-        self.model.train()
-        x, edge_index = data.x, data.edge_index
-        embeddings = self.model(x, edge_index)
-        return embeddings
-
-    def _fit_node2vec(self, data):
-        """
-        Perform Node2vec encoding on the input data.
-        
         Parameters:
-        - data: Graph data in torch_geometric format.
-        
+        - data: Graph data containing node features and edge indices (`x`, `edge_index`).
+
         Returns:
-        - embeddings (dict): Node embeddings indexed by node IDs.
+        - embeddings (dict): Dictionary with node IDs as keys and embedding vectors as values.
         """
-        nx_graph = to_networkx(data, to_undirected=True)
+        nx_graph = to_networkx(data, to_undirected=True)  # Convert PyG data to NetworkX graph
         node2vec = Node2Vec(
-            nx_graph, 
-            dimensions=self.dimensions, 
-            walk_length=self.walk_length, 
-            num_walks=self.num_walks, 
+            nx_graph,
+            dimensions=self.dimensions,
+            walk_length=self.walk_length,
+            num_walks=self.num_walks,
+            window=self.window,
+            min_count=self.min_count,
+            batch_words=self.batch_words,
             workers=4
         )
         model = node2vec.fit(window=self.window, min_count=self.min_count, batch_words=self.batch_words)
+        
+        # Convert node embeddings to a dictionary
         embeddings = {str(node): model.wv[str(node)] for node in nx_graph.nodes()}
         return embeddings
+class GraphSAGEEncoder(torch.nn.Module):
+    def __init__(self, in_channels=64, hidden_channels=128, out_channels=64):
+        """
+        Initialize the GraphSAGE model.
 
-    def encode(self, data):
+        Parameters:
+        - in_channels (int): Number of input features per node.
+        - hidden_channels (int): Number of hidden channels in GraphSAGE layers.
+        - out_channels (int): Number of output features (embedding size).
         """
-        Public method to perform encoding based on the chosen method.
+        super(GraphSAGEEncoder, self).__init__()
+        self.conv1 = SAGEConv(in_channels, hidden_channels)
+        self.conv2 = SAGEConv(hidden_channels, out_channels)
+    
+    def forward(self, x, edge_index):
         """
-        return self.fit(data)
+        Forward pass through the GraphSAGE layers.
+
+        Parameters:
+        - x (tensor): Node features.
+        - edge_index (tensor): Edge indices representing the graph.
+
+        Returns:
+        - embeddings (tensor): Node embeddings after passing through the model.
+        """
+        x = F.relu(self.conv1(x, edge_index))
+        x = self.conv2(x, edge_index)
+        return x
+
+    def fit(self, data):
+        """
+        Perform GraphSAGE encoding on the input graph data.
+
+        Parameters:
+        - data: Graph data containing node features (`x`) and edge indices (`edge_index`).
+
+        Returns:
+        - embeddings (tensor): Encoded node embeddings.
+        """
+        self.train()
+        x, edge_index = data.x, data.edge_index
+        embeddings = self.forward(x, edge_index)
+        return embeddings

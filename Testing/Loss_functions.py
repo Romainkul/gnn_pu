@@ -1,7 +1,8 @@
 from torch_geometric.nn.models import DeepGraphInfomax
-import torch
+import torch 
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
+from torch import nn
 
 #Can adapt with another gnn model
 class GNNEncoder(torch.nn.Module):
@@ -95,7 +96,6 @@ class DiffusionPseudoLabelingLoss(torch.nn.Module):
         
         return pseudo_loss
 
-
 class NeighborSimilarityLoss(torch.nn.Module):
     def __init__(self, lambda_reg=0.1):
         super(NeighborSimilarityLoss, self).__init__()
@@ -106,3 +106,60 @@ class NeighborSimilarityLoss(torch.nn.Module):
         src, dst = edge_index
         similarity_loss = F.mse_loss(embeddings[src], embeddings[dst])
         return self.lambda_reg * similarity_loss
+
+class LabelPropagationLoss(torch.nn.Module):
+    def __init__(self, num_nodes, num_propagation_steps=10, alpha=0.5, learning_rate=0.01):
+        """
+        Initializes the Label Propagation Loss for reducing heterophily in graph PU learning.
+        
+        Parameters:
+        - num_nodes: Total number of nodes in the graph.
+        - num_propagation_steps: Number of label propagation steps to perform (iterations).
+        - alpha: Propagation parameter controlling self-retention of labels (0 < alpha < 1).
+        - learning_rate: Step size for updating adjacency weights to reduce heterophily.
+        """
+        super(LabelPropagationLoss, self).__init__()
+        self.num_propagation_steps = num_propagation_steps
+        self.alpha = alpha
+        self.learning_rate = learning_rate
+        
+        # Initialize a learnable mask matrix M representing edge weights (homophily-focused)
+        self.M = nn.Parameter(torch.ones((num_nodes, num_nodes)), requires_grad=True)
+
+    def forward(self, adj_matrix, positive_nodes):
+        """
+        Applies label propagation on the adjacency matrix while reducing heterophilic influence.
+
+        Parameters:
+        - adj_matrix: The adjacency matrix of the graph.
+        - positive_nodes: Binary tensor indicating positive nodes (1 for positive nodes, 0 otherwise).
+
+        Returns:
+        - adj_matrix: Updated adjacency matrix with reduced heterophily.
+        """
+        # Normalize adjacency matrix with degree matrix (for diffusion propagation)
+        degree_matrix = torch.diag(torch.pow(adj_matrix.sum(1), -0.5))
+        diffusion_matrix = degree_matrix @ adj_matrix @ degree_matrix
+
+        # Initialize class-posterior probabilities, E(0)
+        class_posterior = torch.zeros((adj_matrix.size(0), 2), device=adj_matrix.device)
+        class_posterior[:, 0] = 1 - positive_nodes  # Initialize as negative for unlabeled nodes
+        class_posterior[:, 1] = positive_nodes      # Initialize as positive for observed positives
+
+        # Perform label propagation over multiple iterations
+        for _ in range(self.num_propagation_steps):
+            class_posterior = self.alpha * diffusion_matrix @ class_posterior + (1 - self.alpha) * class_posterior
+
+        # Calculate propagation loss to minimize misclassification of positive nodes
+        propagated_neg_probs = class_posterior[positive_nodes == 1, 0]  # Negative probabilities for positive nodes
+        loss = -torch.log(1 - propagated_neg_probs + 1e-10).mean()  # Avoid log(0) with a small epsilon
+
+        # Backpropagate to adjust mask matrix M (edge weights)
+        loss.backward()
+        with torch.no_grad():
+            self.M.data -= self.learning_rate * self.M.grad  # Update M to refine edge weights
+            self.M.grad.zero_()
+
+        # Update adjacency matrix with optimized mask matrix M for reduced heterophily
+        adj_matrix = self.M * adj_matrix  # Element-wise multiplication
+        return adj_matrix
