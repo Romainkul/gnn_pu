@@ -76,7 +76,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Load parameters for running and evaluating bootstrap PU learning')
     parser.add_argument('--dataset', '-d', type=str, default='citeseer',
                         help='Data set to be used')
-    parser.add_argument('--positive_index', '-c', type=list, default=[0],
+    parser.add_argument('--positive_index', '-c', type=list, default=[0,1,2],
                         help='Index of label to be used as positive')
     parser.add_argument('--sample_seed', '-s', type=int, default=2,
                         help='Random seed for sampling labeled positive from all positive nodes')

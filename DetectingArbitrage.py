@@ -107,7 +107,7 @@ output = model(data)
 #X=output.detach().numpy()
 # output contains the node classifications or graph representations
 print(output)
-
+"""
 
 # Mock data - replace with actual address features and labels
 n_samples = 1000
@@ -181,3 +181,4 @@ prob_sorted = probabilities[sorted_indices]
 # Determine reliable negatives using threshold θ = 0.15
 theta = 0.15
 reliable_negatives
+"""
