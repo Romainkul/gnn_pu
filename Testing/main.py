@@ -15,7 +15,6 @@ import warnings
 from data_generating import load_dataset, make_pu_dataset
 #from data_generating import *
 
-#change pu_loss
 #import data_generating library
 
 import torch
