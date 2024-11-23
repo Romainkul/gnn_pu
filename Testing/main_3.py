@@ -12,7 +12,7 @@ import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, f1_score, recall_score, roc_auc_score, precision_recall_fscore_support
 from data_generating import load_dataset, make_pu_dataset
-from Loss_functions import ContrastiveLossWithDiffusionReliableNegatives,ContrastiveSimilarityLoss ,NeighborhoodSimilarityLoss, LearnableDiffusionContrastiveLoss, NeighborhoodConsistencyLoss, AttentionBasedDGI, LabelPropagationLoss, AdjacencyBasedLoss, DistanceCentroid, ClusterCompactnessLoss, TripletMarginLoss, NeighborhoodSmoothnessLoss, ContrastiveLoss
+from Loss_functions import LabelPropagationLoss, AdjacencyBasedLoss, DistanceCentroid, ClusterCompactnessLoss, TripletMarginLoss, NeighborhoodSmoothnessLoss, TwoHopNeighborLoss
 from Reliable_negatives import RocchioMethod, SpyMethod, PositiveEnlargement, KMeansMethod, GenerativePUMethod, OneDNFMethod
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from typing import Optional, Dict, List, Tuple, Any
@@ -183,7 +183,7 @@ class GraphSAGEEncoder(nn.Module):
         train_losses = []
         val_losses = []
         criterion_9 = AdjacencyBasedLoss()
-        criterion_10 = ContrastiveSimilarityLoss()
+        criterion_10 = TwoHopNeighborLoss()
         criterion_11 = DistanceCentroid()
         criterion_cluster = ClusterCompactnessLoss()
         criterion_triplet = TripletMarginLoss(margin=1.0, p=2)
@@ -228,12 +228,12 @@ class GraphSAGEEncoder(nn.Module):
             cluster_loss = criterion_cluster(embeddings, reliable_positives, reliable_negatives) if epoch >= 2 else torch.tensor(200.0)
             triplet_loss = criterion_triplet(embeddings, reliable_positives, reliable_negatives) if epoch >= 2 else torch.tensor(200.0)
             smoothness_loss = criterion_smoothness(embeddings, dense_to_sparse(A_hat)[0]) if epoch >= 2 else torch.tensor(200.0)
-            #contrastive_loss = contrastive(embeddings_aug_1, embeddings)
+            two_hop = criterion_10(embeddings, A_hat) if epoch >= 2 else torch.tensor(200.0)
             homo_loss, hetero_loss = criterion_9(data, embeddings, A_hat)
             
-            w = self.dynamic_weight_update(lpl_loss, distance_loss, homo_loss, hetero_loss, cluster_loss, triplet_loss, smoothness_loss)#, contrastive_loss)
+            w = self.dynamic_weight_update(lpl_loss, distance_loss, homo_loss, hetero_loss, cluster_loss, triplet_loss, smoothness_loss, two_hop)#, contrastive_loss)
 
-            loss = (a*w[0] * lpl_loss + b*w[1] * distance_loss + c*w[2] * homo_loss + d*w[3] * hetero_loss + w[4] * cluster_loss + w[5] * triplet_loss + w[6] * smoothness_loss)#+ w[7]*contrastive_loss)
+            loss = (a*w[0] * lpl_loss + b*w[1] * distance_loss + c*w[2] * homo_loss + d*w[3] * hetero_loss + w[4] * cluster_loss + w[5] * triplet_loss + w[6] * smoothness_loss + w[7]*two_hop)#+ w[7]*contrastive_loss)
 
             loss.backward() 
             if max_grad_norm > 0:
@@ -242,7 +242,7 @@ class GraphSAGEEncoder(nn.Module):
 
             train_losses.append(loss.item())
             if epoch % 50 == 0:
-                logger.info(f"Epoch {epoch+1:03d}, Total Loss: {loss:.4f}, LPL Loss: {lpl_loss:.4f}, Distance Loss: {distance_loss:.4f}, Homophily Loss: {homo_loss:.4f}, Heterophily loss: {hetero_loss}, Cluster loss: {cluster_loss}, Triplet loss: {triplet_loss}, smoothness loss: {smoothness_loss}")
+                logger.info(f"Epoch {epoch+1:03d}, Total Loss: {loss:.4f}, LPL Loss: {lpl_loss:.4f}, Distance Loss: {distance_loss:.4f}, Homophily Loss: {homo_loss:.4f}, Heterophily loss: {hetero_loss}, Cluster loss: {cluster_loss}, Triplet loss: {triplet_loss}, smoothness loss: {smoothness_loss}, Two-Hop Dissimilarity {two_hop}")
 
             scheduler.step(loss.item())
 

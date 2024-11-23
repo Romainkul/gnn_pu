@@ -169,8 +169,24 @@ class NeighborhoodSimilarityLoss(torch.nn.Module):
         loss = self.lambda_reg * similarity_loss + loss
         return loss
 
+class ContrastiveLoss(nn.Module):  #Look into debiased contrastive loss
+    def __init__(self, temperature=0.5):
+        super(ContrastiveLoss, self).__init__()
+        self.temperature = temperature
 
-    
+    def forward(self, embeddings1, embeddings2):
+        embeddings1 = F.normalize(embeddings1, dim=1)
+        embeddings2 = F.normalize(embeddings2, dim=1)
+
+        sim_matrix = torch.mm(embeddings1, embeddings2.T) / self.temperature
+
+        positives = torch.diag(sim_matrix)
+        negatives = sim_matrix.sum(dim=1) - positives
+        loss = -torch.mean(torch.log((positives + 1e-8) / (negatives + 1e-8)))
+                
+
+        return loss
+
 class LearnableDiffusionContrastiveLoss(nn.Module):
     def __init__(self, in_channels, hidden_channels, temperature=0.2, num_diffusion_steps=10, neg_samples=10):
         super(LearnableDiffusionContrastiveLoss, self).__init__()
@@ -410,7 +426,6 @@ class DistanceCentroid(nn.Module):
         total_loss = (pos_loss + neg_loss) / 2 if neg_loss != 0 else pos_loss
 
         return total_loss
-
 class ClusterCompactnessLoss(nn.Module):
     def __init__(self):
         super(ClusterCompactnessLoss, self).__init__()
@@ -440,7 +455,7 @@ class TripletMarginLoss(nn.Module):
         triplet_loss = F.relu(self.margin + pos_dists.mean() - neg_dists.mean())
         return triplet_loss
     
-class NeighborhoodSmoothnessLoss(nn.Module):
+class NeighborhoodSmoothnessLoss(nn.Module): 
     def __init__(self, lambda_smooth=0.1):
         super(NeighborhoodSmoothnessLoss, self).__init__()
         self.lambda_smooth = lambda_smooth
@@ -449,25 +464,38 @@ class NeighborhoodSmoothnessLoss(nn.Module):
         row, col = edge_index
         neighbor_diffs = (embeddings[row] - embeddings[col]).pow(2).mean()
         return self.lambda_smooth * neighbor_diffs
+    
+class TwoHopNeighborLoss(nn.Module):
+    def __init__(self, lambda_two_hop=1.0, sim_function='cosine'):
+        super(TwoHopNeighborLoss, self).__init__()
+        self.lambda_two_hop = lambda_two_hop
+        self.sim_function = sim_function
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+    def get_two_hop_neighbors(A):
+        A2 = torch.matmul(A, A)
+        return A2
 
-class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=0.5):
-        super(ContrastiveLoss, self).__init__()
-        self.temperature = temperature
+    def forward(self, embeddings, adjacency_matrix):
+        # Compute 2-hop neighbors using the adjacency matrix squared (A^2)
+        A2 = self.get_two_hop_neighbors(adjacency_matrix)
 
-    def forward(self, embeddings1, embeddings2):
-        embeddings1 = F.normalize(embeddings1, dim=1)
-        embeddings2 = F.normalize(embeddings2, dim=1)
+        # Normalize embeddings (optional)
+        Z_norm = F.normalize(embeddings, p=2, dim=1)
 
-        sim_matrix = torch.mm(embeddings1, embeddings2.T) / self.temperature
+        # Compute pairwise cosine similarity for 2-hop neighbors
+        if self.sim_function == 'cosine':
+            similarity = torch.mm(Z_norm, Z_norm.T)
+        else:
+            raise ValueError("sim_function must be 'cosine'")
 
-        positives = torch.diag(sim_matrix)
-        negatives = sim_matrix.sum(dim=1) - positives
-        loss = -torch.mean(torch.log((positives + 1e-8) / (negatives + 1e-8)))
-                
+        # Get the pairs of 2-hop neighbors (A^2 > 0 indicates 2-hop neighbors)
+        two_hop_mask = (A2 > 0).float()
 
-        return loss
+        # Apply the mask to compute similarity for 2-hop neighbors only
+        two_hop_similarity = similarity * two_hop_mask
+
+        # For 2-hop neighbors, we want the similarity to be low (enforce distinct embeddings)
+        two_hop_loss = torch.sum(two_hop_similarity)
+
+        # Apply the regularization factor (lambda_two_hop)
+        return self.lambda_two_hop * two_hop_loss
