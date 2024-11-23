@@ -106,12 +106,18 @@ def load_dataset(dataset_name):
     return data
 
 def make_pu_dataset(data, pos_index=[0], fixed_seed=True,
-                    sample_seed=5, train_pct=0.07, val_pct=0.03, test_pct=1.0,half=True):
+                    sample_seed=5, train_pct=0.07, val_pct=0.03, test_pct=1.0,half=False,show_count=False):
 
     # transform into positive-negative dataset
     data.num_classes = torch.max(data.y, dim=0)[0].item() + 1
     if half:
         pos_index = [i for i in range(data.num_classes//2)]
+    count=0
+    if show_count:
+        for i in range(data.num_classes):
+            count+=sum(data.y == i)
+            print(i, sum(data.y == i))
+        print(count)
     data.y = sum([data.y == idx for idx in pos_index]).long()
 
     data.train_mask = torch.zeros(data.y.size()).bool().fill_(False)

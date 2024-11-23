@@ -9,9 +9,9 @@ warnings.filterwarnings("ignore")
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='load parameter for running and evaluating \
                                                  boostrap pu learning')
-    parser.add_argument('--dataset', '-d', type=str, default='amazon-photos',
+    parser.add_argument('--dataset', '-d', type=str, default='citeseer',
                         help='Data set to be used')
-    parser.add_argument('--positive_index', '-c', type=int, default=0,
+    parser.add_argument('--positive_index', '-c', type=int, default=3,
                         help='Index of label to be used as positive')
     parser.add_argument('--sample_seed', '-s', type=int, default=1,
                         help='random seed for sample labeled positive from all positive nodes')
