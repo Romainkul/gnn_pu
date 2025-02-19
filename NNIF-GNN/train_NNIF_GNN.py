@@ -1,4 +1,5 @@
 import csv
+import datetime
 import random
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score
@@ -431,7 +432,6 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
         {
           "dataset_name": str,
           "train_pct": float,
-          "sample_seed": int,
           "mechanism": str,
 
           "alpha": float,
@@ -459,7 +459,6 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
     # Unpack parameters from dict
     dataset_name = params["dataset_name"]
     train_pct = params["train_pct"]
-    sample_seed = params["sample_seed"]
     mechanism = params["mechanism"]
 
     alpha = params["alpha"]
@@ -478,6 +477,15 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
 
     n_seeds = params["seeds"]
     output_csv = params["output_csv"]
+
+    # Append current day, month, hour, and second to the CSV filename
+    timestamp = datetime.datetime.now().strftime("%d%m%H%M%S")
+    output_csv = params["output_csv"]
+    if "." in output_csv:
+        base, ext = output_csv.rsplit(".", 1)
+        output_csv = f"{base}_{timestamp}.{ext}"
+    else:
+        output_csv = f"{output_csv}_{timestamp}.csv"
 
     # Decide on CPU or GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -503,7 +511,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
             data = make_pu_dataset(
                 data,
                 mechanism=mechanism,
-                sample_seed=sample_seed,   # distinct from the training seeds loop
+                sample_seed=seed,
                 train_pct=train_pct
             )
 
