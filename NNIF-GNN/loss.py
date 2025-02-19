@@ -220,3 +220,87 @@ class ContrastiveLoss(nn.Module):
         # Mean over all valid pairs
         final_loss = total_sum / total_pairs
         return final_loss
+
+class ContrastiveLoss(nn.Module):
+    """
+    Contrastive Loss with Posterior-Based Pair Sampling.
+
+    This loss function samples a subset of node pairs (instead of using all O(N²)
+    pairs) based on the nodes' posterior probabilities. Each node is sampled with a
+    probability proportional to its posterior for a given class.
+
+    Args:
+        margin (float): Margin for negative pairs.
+        num_pairs (int): Number of node pairs to sample for computing the loss.
+    """
+    def __init__(self, margin: float = 0.5, num_pairs: int = 10000):
+        super().__init__()
+        self.margin = margin
+        self.num_pairs = num_pairs
+
+    def forward(self, embeddings: torch.Tensor, E: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the contrastive loss on a sampled set of node pairs.
+
+        Args:
+            embeddings (torch.Tensor): Tensor of shape [N, d] containing node embeddings.
+            E (torch.Tensor): Tensor of shape [N, 2] where each row represents the
+                posterior probabilities (prob_negative, prob_positive) for a node.
+
+        Returns:
+            torch.Tensor: The computed contrastive loss.
+        """
+        device = embeddings.device
+        num_nodes = embeddings.size(0)
+        num_pairs = self.num_pairs
+
+        # Normalize the embeddings.
+        normalized_embeddings = F.normalize(embeddings, dim=1)
+
+        # --- Sampling Pairs Based on Posterior ---
+        # Compute a global class distribution from the posterior probabilities.
+        global_class_probs = E.mean(dim=0)  # Shape: [2]
+        class_distribution = torch.distributions.Categorical(global_class_probs)
+        # For each pair, sample a class (0 or 1).
+        sampled_classes = class_distribution.sample((num_pairs,))  # Shape: [num_pairs]
+
+        sampled_pairs_list = []
+        eps = 1e-6  # Small constant to prevent zero weights
+
+        # For each class, sample indices for pairs assigned to that class.
+        for cls in [0, 1]:
+            # Identify pairs assigned to the current class.
+            cls_pair_indices = (sampled_classes == cls).nonzero(as_tuple=True)[0]
+            num_cls_pairs = cls_pair_indices.numel()
+            if num_cls_pairs > 0:
+                # Use the posterior for the current class as sampling weights.
+                weights = E[:, cls] + eps  # Shape: [N]
+                # Sample two indices per pair (with replacement) using the weights.
+                pair_indices = torch.multinomial(weights, num_samples=2 * num_cls_pairs, replacement=True)
+                pair_indices = pair_indices.view(-1, 2)  # Shape: [num_cls_pairs, 2]
+                sampled_pairs_list.append(pair_indices)
+
+        if sampled_pairs_list:
+            sampled_pairs = torch.cat(sampled_pairs_list, dim=0)  # Approximately [num_pairs, 2]
+        else:
+            # Fallback: return an empty tensor if no pairs were sampled (unlikely scenario).
+            sampled_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
+
+        # --- Compute Cosine Similarity and Contrastive Loss for Sampled Pairs ---
+        # Extract indices for the two nodes in each pair.
+        idx_i = sampled_pairs[:, 0]
+        idx_j = sampled_pairs[:, 1]
+
+        # Compute the cosine similarity for each sampled pair.
+        cosine_similarities = (normalized_embeddings[idx_i] * normalized_embeddings[idx_j]).sum(dim=1)
+
+        # Compute the posterior similarity for each pair:
+        # For pair (i, j): P_same = E[i, 0] * E[j, 0] + E[i, 1] * E[j, 1]
+        posterior_similarity = E[idx_i, 0] * E[idx_j, 0] + E[idx_i, 1] * E[idx_j, 1]
+
+        # Compute the loss components.
+        positive_loss = (cosine_similarities - 1.0) ** 2
+        negative_loss = F.relu(cosine_similarities - self.margin) ** 2
+        pair_loss = positive_loss * posterior_similarity + negative_loss * (1.0 - posterior_similarity)
+
+        return pair_loss.mean()
