@@ -136,7 +136,7 @@ def train_graph(
     device: torch.device,
     alpha: float,
     K: int,
-    method: str,
+    treatment: str,
     margin: float,
     pos_weight: float,
     ratio: float = 0.1,
@@ -170,8 +170,8 @@ def train_graph(
         Parameter for label propagation (mixing factor).
     K : int
         Number of label propagation steps.
-    method : str
-        String indicating method for anomaly detection (passed to ReliableValues).
+    treatment : str
+        String indicating treatment for anomaly detection (passed to ReliableValues).
     margin : float
         Margin used in the contrastive loss.
     pos_weight : float
@@ -234,7 +234,7 @@ def train_graph(
 
             # Anomaly detection => reliable positives/negatives
             NNIF = ReliableValues(
-                method="removal",
+                method=treatment,
                 treatment_ratio=ratio,
                 anomaly_detector=WeightedIsoForest(n_estimators=200),
                 random_state=42,
@@ -412,7 +412,8 @@ def main(
         margin=params["margin"],
         pos_weight=params["pos_weight"],
         ratio=params["ratio"],
-        lpl_weight=params["lpl_weight"]
+        lpl_weight=params["lpl_weight"],
+        treatment=params["treatment"]
     )
 
     return model, train_losses, final_A_hat
@@ -429,11 +430,9 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
 
         {
           "dataset_name": str,
-          "positive_index": list,
           "train_pct": float,
-          "val_pct": float,
-          "test_pct": float,
           "sample_seed": int,
+          "mechanism": str,
 
           "alpha": float,
           "K": int,
@@ -447,6 +446,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
           "ratio": float,
           "pos_weight": float,
           "aggregation": str,
+          "treatment": str,
           "seeds": int,            # number of repeated runs
           "output_csv": str        # path to CSV file
         }
@@ -458,11 +458,9 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
     """
     # Unpack parameters from dict
     dataset_name = params["dataset_name"]
-    positive_index = params["positive_index"]
     train_pct = params["train_pct"]
-    val_pct = params["val_pct"]
-    test_pct = params["test_pct"]
     sample_seed = params["sample_seed"]
+    mechanism = params["mechanism"]
 
     alpha = params["alpha"]
     K = params["K"]
@@ -476,6 +474,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
     ratio = params["ratio"]
     pos_weight = params["pos_weight"]
     aggregation = params["aggregation"]
+    treatment = params["treatment"]
 
     n_seeds = params["seeds"]
     output_csv = params["output_csv"]
@@ -503,20 +502,18 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
             # --- 2) Create a PU dataset (some positives labeled) ---
             data = make_pu_dataset(
                 data,
-                pos_index=positive_index,
+                mechanism=mechanism,
                 sample_seed=sample_seed,   # distinct from the training seeds loop
-                train_pct=train_pct,
-                val_pct=val_pct,
-                test_pct=test_pct,
-                half=False
+                train_pct=train_pct
             )
+
             data = data.to(device)
 
             # Print parameters for reference
             print(f"Running experiment with seed={seed}:")
             print(f" - alpha={alpha}, K={K}, layers={layers}, hidden={hidden_channels}, out={out_channels}")
             print(f" - norm={norm}, dropout={dropout}, margin={margin}, lpl_weight={lpl_weight}")
-            print(f" - ratio={ratio}, pos_weight={pos_weight}, aggregation={aggregation}")
+            print(f" - ratio={ratio}, pos_weight={pos_weight}, aggregation={aggregation}, treatment={treatment}")
 
             # --- 3) Train GNN with these parameters ---
             train_params = {
@@ -528,7 +525,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 "alpha": alpha,
                 "K": K,
                 "norm": norm,
-                "method": "removal",  # or relabeling if your pipeline needs that
+                "method": treatment,
                 "dropout": dropout,
                 "lpl_weight": lpl_weight,
                 "margin": margin,
@@ -542,7 +539,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
 
             # --- 5) PU/NNIF approach ---
             pnn_model = PNN(
-                method='removal',
+                method=treatment,
                 treatment_ratio=ratio,
                 anomaly_detector=WeightedIsoForest(n_estimators=200),
                 random_state=42,         # or pass `seed` if needed
