@@ -27,7 +27,7 @@ def get_dataset(
     root: str,
     name: str,
     transform=NormalizeFeatures()
-) -> datasets.InMemoryDataset:
+):
     """
     Retrieve a PyG dataset by name (e.g., 'coauthor-cs', 'coauthor-physics', 
     'amazon-computers', 'amazon-photos') and apply a transform if desired.

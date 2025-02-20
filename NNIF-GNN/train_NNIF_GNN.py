@@ -13,10 +13,10 @@ from torch_sparse import SparseTensor
 from typing import Dict, Tuple, List, Any
 import logging
 
-from .loss import LabelPropagationLoss, ContrastiveLoss
-from .NNIF import PNN, ReliableValues, WeightedIsoForest
-from .encoder import GraphSAGEEncoder
-from .data_generating import load_dataset, make_pu_dataset
+from loss import LabelPropagationLoss, ContrastiveLoss
+from NNIF import PNN, ReliableValues, WeightedIsoForest
+from encoder import GraphSAGEEncoder
+from data_generating import load_dataset, make_pu_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -223,15 +223,15 @@ def train_graph(
     model = model.to(device)
 
     for epoch in range(num_epochs):
-        print_cuda_meminfo(f"Epoch {epoch} start")
+        #print_cuda_meminfo(f"Epoch {epoch} start")
 
         model.train()
         optimizer.zero_grad()
 
-        with autocast():
+        with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
             # 2) Forward pass with current adjacency
             embeddings = model(data.x.to(device), A_hat)
-            print_cuda_meminfo(f"Epoch {epoch} after forward")
+            #print_cuda_meminfo(f"Epoch {epoch} after forward")
 
             # Anomaly detection => reliable positives/negatives
             NNIF = ReliableValues(
@@ -242,7 +242,7 @@ def train_graph(
                 high_score_anomaly=True,
             )
             norm_emb = F.normalize(embeddings, dim=1)
-            features_np = norm_emb.detach().cpu().numpy()
+            features_np = norm_emb.detach().cpu().to(torch.float32).numpy()
             y_labels = data.train_mask.detach().cpu().numpy().astype(int)
             reliable_negatives, reliable_positives = NNIF.get_reliable(features_np, y_labels)
 
@@ -265,7 +265,7 @@ def train_graph(
 
         # Backprop
         scaler.scale(loss).backward()
-        print_cuda_meminfo(f"Epoch {epoch} after backward")
+        #print_cuda_meminfo(f"Epoch {epoch} after backward")
 
         # Gradient clipping
         if max_grad_norm > 0:
@@ -370,6 +370,7 @@ def main(
           - "pos_weight"
           - "ratio"
           - "lpl_weight"
+          - "treatment"
         The exact usage depends on the GraphSAGE and training process.
     device : torch.device
         The device (CPU/GPU) on which computations will be performed.
@@ -401,7 +402,7 @@ def main(
         norm=params["norm"],
         aggregation=params["aggregation"]
     )
-
+    print(params)
     # Train the model
     train_losses, final_A_hat = train_graph(
         model=model,
@@ -409,7 +410,6 @@ def main(
         device=device,
         alpha=params["alpha"],
         K=params["K"],
-        method=params["method"],
         margin=params["margin"],
         pos_weight=params["pos_weight"],
         ratio=params["ratio"],
@@ -533,11 +533,11 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 "alpha": alpha,
                 "K": K,
                 "norm": norm,
-                "method": treatment,
                 "dropout": dropout,
                 "lpl_weight": lpl_weight,
                 "margin": margin,
-                "ratio": ratio
+                "ratio": ratio,
+                "treatment":treatment
             }
             model, train_losses, A_hat = main(data, train_params, device)
 
