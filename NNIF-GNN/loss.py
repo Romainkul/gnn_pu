@@ -17,7 +17,9 @@ class LabelPropagationLoss(nn.Module):
         A_hat (SparseTensor):
             Sparse adjacency matrix with self-loops included.
         alpha (float):
-            Weight balancing old distribution vs. neighbor distribution in each step.
+            Initial value for the weight balancing the old distribution vs. 
+            the neighbor distribution in each step. The effective alpha 
+            is learned such that it always lies between 0 and 1.
         K (int):
             Number of propagation steps.
         pos_weight (float):
@@ -33,7 +35,6 @@ class LabelPropagationLoss(nn.Module):
         >>> criterion = LabelPropagationLoss(A_hat, alpha=0.5, K=10)
         >>> loss_val, updated_adj, E = criterion(node_embeddings, pos_indices, neg_indices)
     """
-
     def __init__(
         self,
         A_hat: SparseTensor,
@@ -43,14 +44,15 @@ class LabelPropagationLoss(nn.Module):
         init_temperature: float = 1.0
     ) -> None:
         super().__init__()
-        self.alpha = alpha
+        # Instead of a fixed alpha, we use a raw parameter that we will map to (0,1)
+        self.raw_alpha = nn.Parameter(torch.tensor(alpha))
         self.K = K
         self.pos_weight = pos_weight
 
-        # Temperature is a learnable parameter
+        # Temperature is a learnable parameter.
         self.temperature = nn.Parameter(torch.tensor(init_temperature))
 
-        # Buffers for adjacency sums and inverse degrees
+        # Buffers for adjacency sums and inverse degrees.
         self.register_buffer('row_sums', A_hat.sum(dim=1))
         self.A_hat = A_hat
         self.register_buffer('d_inv', 1.0 / torch.clamp(self.row_sums, min=1e-12))
@@ -75,34 +77,36 @@ class LabelPropagationLoss(nn.Module):
         Returns:
             (loss, updated_A_hat, E):
                 - loss (torch.Tensor): The scalar loss value.
-                - updated_A_hat (SparseTensor): Potentially updated adjacency (same here).
-                - E (torch.Tensor): Soft assignment matrix of shape [N, 2], where 
+                - updated_A_hat (SparseTensor): The (unchanged) input adjacency matrix.
+                - E (torch.Tensor): Soft assignment matrix of shape [N, 2] where
                   E[i] = (prob_neg, prob_pos) for node i.
         """
         device = embeddings.device
         N = embeddings.size(0)
 
-        # Initialize the label distribution E:
-        # - Column 0: probability of being negative
-        # - Column 1: probability of being positive
+        # Compute effective alpha to ensure it lies between 0 and 1.
+        effective_alpha = torch.sigmoid(self.raw_alpha)
+
+        # Initialize label distribution E:
+        # Column 0: probability of being negative
+        # Column 1: probability of being positive
         E = torch.zeros((N, 2), device=device)
         E[positive_nodes, 1] = 1.0
         E[negative_nodes, 0] = 1.0
 
         # Perform K-step label propagation
         for _ in range(self.K):
-            # Multiply adjacency by E and row-normalize
-            neighbor_E = self.A_hat.matmul(E)               # [N, 2]
+            # Compute the neighbor aggregation and row-normalize
+            neighbor_E = self.A_hat.matmul(E)  # [N, 2]
             neighbor_E = self.d_inv.view(-1, 1) * neighbor_E
 
-            # Update E: alpha * old + (1 - alpha) * neighbor
-            E = self.alpha * E + (1.0 - self.alpha) * neighbor_E
+            # Update E: balance old and neighbor contributions using effective_alpha
+            E = effective_alpha * E + (1.0 - effective_alpha) * neighbor_E
 
-            # Softmax with learnable temperature
+            # Apply softmax with learnable temperature scaling
             E = F.softmax(E / self.temperature, dim=1)
 
-        # Compute loss for positive and negative sets
-        # Clamping to avoid log(0)
+        # Compute loss for positive and negative nodes (avoid log(0) by clamping)
         pos_probs = torch.clamp(E[positive_nodes, 1], min=1e-6)
         neg_probs = torch.clamp(E[negative_nodes, 0], min=1e-6)
 
@@ -301,6 +305,78 @@ class ContrastiveLoss(nn.Module):
         # Compute the loss components.
         positive_loss = (cosine_similarities - 1.0) ** 2
         negative_loss = F.relu(cosine_similarities - self.margin) ** 2
+        pair_loss = positive_loss * posterior_similarity + negative_loss * (1.0 - posterior_similarity)
+
+        return pair_loss.mean()
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ContrastiveLoss(nn.Module):
+    """
+    Contrastive Loss with Posterior-Based Pair Sampling.
+
+    This loss function samples a subset of node pairs (instead of using all O(N²)
+    pairs) based on the nodes' posterior probabilities. Each node is sampled with a
+    probability proportional to its posterior for a given class.
+
+    Args:
+        margin (float): Initial margin for negative pairs. This value is learnable.
+        num_pairs (int): Number of node pairs to sample for computing the loss.
+    """
+    def __init__(self, margin: float = 0.5, num_pairs: int = 10000):
+        super().__init__()
+        # Use a raw margin parameter and map it to a positive value via softplus.
+        self.raw_margin = nn.Parameter(torch.tensor(margin))
+        self.num_pairs = num_pairs
+
+    def forward(self, embeddings: torch.Tensor, E: torch.Tensor) -> torch.Tensor:
+        device = embeddings.device
+        num_nodes = embeddings.size(0)
+        num_pairs = self.num_pairs
+
+        # Normalize the embeddings.
+        normalized_embeddings = F.normalize(embeddings, dim=1)
+
+        # --- Sampling Pairs Based on Posterior ---
+        global_class_probs = E.mean(dim=0)  # Shape: [2]
+        class_distribution = torch.distributions.Categorical(global_class_probs)
+        sampled_classes = class_distribution.sample((num_pairs,))  # Shape: [num_pairs]
+
+        sampled_pairs_list = []
+        eps = 1e-6  # Small constant to prevent zero weights
+
+        for cls in [0, 1]:
+            cls_pair_indices = (sampled_classes == cls).nonzero(as_tuple=True)[0]
+            num_cls_pairs = cls_pair_indices.numel()
+            if num_cls_pairs > 0:
+                weights = E[:, cls] + eps  # Sampling weights based on posterior.
+                pair_indices = torch.multinomial(weights, num_samples=2 * num_cls_pairs, replacement=True)
+                pair_indices = pair_indices.view(-1, 2)
+                sampled_pairs_list.append(pair_indices)
+
+        if sampled_pairs_list:
+            sampled_pairs = torch.cat(sampled_pairs_list, dim=0)
+        else:
+            sampled_pairs = torch.empty((0, 2), dtype=torch.long, device=device)
+
+        idx_i = sampled_pairs[:, 0]
+        idx_j = sampled_pairs[:, 1]
+
+        # Compute cosine similarities between pairs.
+        cosine_similarities = (normalized_embeddings[idx_i] * normalized_embeddings[idx_j]).sum(dim=1)
+
+        # Compute posterior similarity for each pair.
+        posterior_similarity = E[idx_i, 0] * E[idx_j, 0] + E[idx_i, 1] * E[idx_j, 1]
+
+        # Map raw_margin to a positive effective margin.
+        effective_margin = F.softplus(self.raw_margin)
+
+        positive_loss = (cosine_similarities - 1.0) ** 2
+        negative_loss = F.relu(cosine_similarities - effective_margin) ** 2
+
+        # Combine losses, weighting by the posterior similarity.
         pair_loss = positive_loss * posterior_similarity + negative_loss * (1.0 - posterior_similarity)
 
         return pair_loss.mean()
