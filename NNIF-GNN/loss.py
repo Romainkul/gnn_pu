@@ -41,16 +41,12 @@ class LabelPropagationLoss(nn.Module):
         alpha: float = 0.5,
         K: int = 10,
         pos_weight: float = 1.0,
-        init_temperature: float = 1.0
     ) -> None:
         super().__init__()
         # Instead of a fixed alpha, we use a raw parameter that we will map to (0,1)
         self.raw_alpha = nn.Parameter(torch.tensor(alpha))
         self.K = K
         self.pos_weight = pos_weight
-
-        # Temperature is a learnable parameter.
-        self.temperature = nn.Parameter(torch.tensor(init_temperature))
 
         # Buffers for adjacency sums and inverse degrees.
         self.register_buffer('row_sums', A_hat.sum(dim=1))
@@ -103,9 +99,6 @@ class LabelPropagationLoss(nn.Module):
             # Update E: balance old and neighbor contributions using effective_alpha
             E = effective_alpha * E + (1.0 - effective_alpha) * neighbor_E
 
-            # Apply softmax with learnable temperature scaling
-            E = F.softmax(E / self.temperature, dim=1)
-
         # Compute loss for positive and negative nodes (avoid log(0) by clamping)
         pos_probs = torch.clamp(E[positive_nodes, 1], min=1e-6)
         neg_probs = torch.clamp(E[negative_nodes, 0], min=1e-6)
@@ -113,12 +106,104 @@ class LabelPropagationLoss(nn.Module):
         pos_loss = -torch.mean(torch.log(pos_probs))
         neg_loss = -torch.mean(torch.log(neg_probs))
         total_loss = self.pos_weight * pos_loss + neg_loss
-
         updated_A_hat = self.A_hat
-
+        
         return total_loss, updated_A_hat, E
 
+class LabelPropagationLoss(nn.Module):
+    """
+    Implements K-step label propagation on a given adjacency matrix, with a learnable positive mask M 
+    that increases/decreases edge weights, followed by a negative log-likelihood loss on positive and negative sets.
 
+    Args:
+        A_hat (SparseTensor):
+            Sparse adjacency matrix with self-loops included.
+        alpha (float):
+            Initial value for the weight balancing the old distribution vs. 
+            the neighbor distribution in each step. The effective alpha 
+            is learned such that it always lies between 0 and 1.
+        K (int):
+            Number of propagation steps.
+        pos_weight (float):
+            Weight assigned to the positive loss term.
+        init_temperature (float):
+            Initial value for the temperature parameter (learnable).
+
+    Shape:
+        - The adjacency matrix A_hat should be of shape [N, N] (stored as SparseTensor).
+        - The input embeddings should be of shape [N, d].
+
+    Example:
+        >>> criterion = LabelPropagationLoss(A_hat, alpha=0.5, K=10)
+        >>> loss_val, updated_A_hat, E = criterion(node_embeddings, pos_indices, neg_indices)
+    """
+    def __init__(
+        self,
+        A_hat: SparseTensor,
+        alpha: float = 0.5,
+        K: int = 10,
+        pos_weight: float = 1.0
+    ) -> None:
+        super().__init__()
+        # Instead of a fixed alpha, we use a raw parameter that we will map to (0,1)
+        self.raw_alpha = nn.Parameter(torch.tensor(alpha))
+        self.K = K
+        self.pos_weight = pos_weight
+
+        # Learnable positive mask for adjacency weights (one value per non-zero edge)
+        # This mask will be applied multiplicatively to the edge weights
+        self.raw_mask = nn.Parameter(torch.ones(A_hat.nnz()))
+
+        # Store original adjacency matrix as provided (mask will be applied in forward)
+        self.A_hat = A_hat
+
+    def forward(
+        self,
+        embeddings: torch.Tensor,
+        positive_nodes: Union[List[int], torch.LongTensor],
+        negative_nodes: Union[List[int], torch.LongTensor]
+    ) -> Tuple[torch.Tensor, SparseTensor, torch.Tensor]:
+        device = embeddings.device
+        N = embeddings.size(0)
+
+        effective_alpha = torch.sigmoid(self.raw_alpha)
+        mask = F.sigmoid(self.raw_mask)
+        
+        # Retrieve current edge values; if None, create a tensor of ones
+        current_values = self.A_hat.storage.value()
+        if current_values is None:
+            current_values = torch.ones(self.A_hat.nnz(), device=mask.device)
+        
+        # Multiply edge values by mask and update the SparseTensor
+        updated_values = current_values * mask
+        updated_A_hat = self.A_hat.set_value(updated_values)
+        
+        # Recompute row sums and inverse degrees for proper row normalization
+        updated_row_sums = updated_A_hat.sum(dim=1)
+        d_inv = 1.0 / torch.clamp(updated_row_sums, min=1e-12)
+
+        # Initialize label distribution E:
+        E = torch.zeros((N, 2), device=device)
+        E[positive_nodes, 1] = 1.0
+        E[negative_nodes, 0] = 1.0
+
+        # Perform K-step label propagation using updated_A_hat
+        for _ in range(self.K):
+            neighbor_E = updated_A_hat.matmul(E)
+            neighbor_E = d_inv.view(-1, 1) * neighbor_E
+            E = effective_alpha * E + (1.0 - effective_alpha) * neighbor_E
+
+        # Compute loss for positive and negative nodes (avoid log(0) by clamping)
+        pos_probs = torch.clamp(E[positive_nodes, 1], min=1e-6)
+        neg_probs = torch.clamp(E[negative_nodes, 0], min=1e-6)
+
+        pos_loss = -torch.mean(torch.log(pos_probs))
+        neg_loss = -torch.mean(torch.log(neg_probs))
+
+        total_loss = self.pos_weight * pos_loss + neg_loss
+        self.A_hat = updated_A_hat
+        return total_loss, updated_A_hat, E
+    
 ##############################################################################
 # Contrastive Loss
 ##############################################################################
@@ -224,7 +309,7 @@ class ContrastiveLoss(nn.Module):
         # Mean over all valid pairs
         final_loss = total_sum / total_pairs
         return final_loss
-
+    
 class ContrastiveLoss(nn.Module):
     """
     Contrastive Loss with Posterior-Based Pair Sampling.
@@ -352,7 +437,7 @@ class ContrastiveLoss(nn.Module):
             num_cls_pairs = cls_pair_indices.numel()
             if num_cls_pairs > 0:
                 weights = E[:, cls] + eps  # Sampling weights based on posterior.
-                pair_indices = torch.multinomial(weights, num_samples=2 * num_cls_pairs, replacement=True)
+                pair_indices = torch.multinomial(1/weights, num_samples=2 * num_cls_pairs, replacement=True)
                 pair_indices = pair_indices.view(-1, 2)
                 sampled_pairs_list.append(pair_indices)
 
@@ -378,5 +463,4 @@ class ContrastiveLoss(nn.Module):
 
         # Combine losses, weighting by the posterior similarity.
         pair_loss = positive_loss * posterior_similarity + negative_loss * (1.0 - posterior_similarity)
-
         return pair_loss.mean()

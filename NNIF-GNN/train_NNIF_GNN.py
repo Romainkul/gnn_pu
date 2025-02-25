@@ -202,20 +202,21 @@ def train_graph(
     """
     from torch.nn.utils import clip_grad_norm_  # local import for clarity
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer = optim.Adam(model.parameters())#, lr=lr, weight_decay=weight_decay)
+    """    scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=0.02,
+        max_lr=0.002,
         steps_per_epoch=1,
         epochs=num_epochs
-    )
+    )"""
     early_stopping = EarlyStopping_GNN(patience=20)
     scaler = GradScaler()
 
     # Step 1: Build adjacency with self-loops
-    edge_index, _ = add_self_loops(data.edge_index, num_nodes=data.num_nodes)
-    edge_index = coalesce(edge_index)
-    A_hat = SparseTensor.from_edge_index(edge_index).coalesce().to(device)
+    #edge_index, _ = add_self_loops(data.edge_index, num_nodes=data.num_nodes)
+    #edge_index = coalesce(edge_index)
+    A_hat = SparseTensor.from_edge_index(data.edge_index).coalesce().to(device)
+
 
     # Tracking variables
     train_losses = []
@@ -254,9 +255,8 @@ def train_graph(
                 A_hat=A_hat,
                 alpha=alpha,
                 K=K,
-                pos_weight=pos_weight,
-                init_temperature=1.0
-            ).to(device)
+                pos_weight=pos_weight
+                ).to(device)
             lpl_loss, updated_A_hat, E = lp_criterion(embeddings, reliable_positives, reliable_negatives)
 
             # 4) Contrastive Loss
@@ -267,7 +267,7 @@ def train_graph(
             loss = lpl_weight * lpl_loss + (1.0 - lpl_weight) * contrastive_loss
 
         # Backprop
-        scaler.scale(loss).backward()
+        scaler.scale(loss).backward(retain_graph=True)
         #print_cuda_meminfo(f"Epoch {epoch} after backward")
 
         # Gradient clipping
@@ -278,7 +278,7 @@ def train_graph(
         # Optimizer step
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()
+        #scheduler.step()
 
         # Record loss
         loss_val = loss.item()
