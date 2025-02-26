@@ -235,7 +235,6 @@ def train_graph(
             # 2) Forward pass with current adjacency
             embeddings = model(data.x.to(device), A_hat)
             #print_cuda_meminfo(f"Epoch {epoch} after forward")
-
             # Anomaly detection => reliable positives/negatives
             if epoch == 0:
                 NNIF = ReliableValues(
@@ -245,7 +244,7 @@ def train_graph(
                     random_state=42,
                     high_score_anomaly=True,
                 )
-                norm_emb = F.normalize(embeddings, dim=1)
+                norm_emb = F.normalize(embeddings, dim=1,p=2, eps=1e-4)
                 features_np = norm_emb.detach().cpu().to(torch.float32).numpy()
                 y_labels = data.train_mask.detach().cpu().numpy().astype(int)
                 reliable_negatives, reliable_positives = NNIF.get_reliable(features_np, y_labels)
@@ -306,6 +305,8 @@ def train_graph(
         # Early stopping check
         if early_stopping(loss_val):
             logger.info(f"Early stopping at epoch {epoch}")
+            break
+        if torch.isnan(loss).any():
             break
 
         # Optional: print(torch.cuda.memory_summary())
@@ -394,7 +395,6 @@ def main(
 
     # Prepare model input size
     in_channels = data.num_node_features
-
     # Build the GraphSAGE model
     model = GraphSAGEEncoder(
         in_channels=in_channels,
@@ -524,6 +524,8 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
             )
 
             data = data.to(device)
+            if torch.isnan(data.x).any():
+                print("NaN values in node features! Skipping seed...")
 
             # Print parameters for reference
             print(f"Running experiment with seed={seed}:")

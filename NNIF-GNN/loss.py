@@ -464,3 +464,4 @@ class ContrastiveLoss(nn.Module):
         # Combine losses, weighting by the posterior similarity.
         pair_loss = positive_loss * posterior_similarity + negative_loss * (1.0 - posterior_similarity)
         return pair_loss.mean()
+    
