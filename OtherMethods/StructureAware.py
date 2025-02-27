@@ -7,7 +7,7 @@ from torch_geometric.utils import to_undirected, k_hop_subgraph, shortest_path
 from torch_sparse import SparseTensor
 import numpy as np
 from encoders import BaseEncoder
-from .NNIF-GNN.data_generating import load_dataset, make_pu_dataset
+from data_generating import load_dataset, make_pu_dataset
 
 class DistanceAwarePULoss(nn.Module):
     def __init__(self, prior_positive=0.5, delta=2):

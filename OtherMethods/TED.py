@@ -10,9 +10,9 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 from torch_geometric.nn import GCNConv, GATConv, SAGEConv
-from transformers import AdamW
+from torch.optim import AdamW
 
-from ..NNIF-GNN.data_generating import load_dataset, make_pu_dataset
+from data_generating import load_dataset, make_pu_dataset
 from algorithm import *
 from model_helper import *
 from estimator import *

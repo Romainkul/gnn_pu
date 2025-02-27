@@ -17,7 +17,7 @@ import logging
 
 from loss import LabelPropagationLoss, ContrastiveLoss
 from NNIF import PNN, ReliableValues, WeightedIsoForest
-from encoder import GraphSAGEEncoder
+from encoder import GraphSAGEEncoder, GraphEncoder, Sampler
 from data_generating import load_dataset, make_pu_dataset
 
 logger = logging.getLogger(__name__)
@@ -244,7 +244,7 @@ def train_graph(
                     random_state=42,
                     high_score_anomaly=True,
                 )
-                norm_emb = F.normalize(embeddings, dim=1,p=2, eps=1e-4)
+                norm_emb = F.normalize(embeddings, dim=1)
                 features_np = norm_emb.detach().cpu().to(torch.float32).numpy()
                 y_labels = data.train_mask.detach().cpu().numpy().astype(int)
                 reliable_negatives, reliable_positives = NNIF.get_reliable(features_np, y_labels)
@@ -256,7 +256,7 @@ def train_graph(
                 K=K,
                 pos_weight=pos_weight
                 ).to(device)
-            lpl_loss, updated_A_hat, E = lp_criterion(embeddings, reliable_positives, reliable_negatives)
+            lpl_loss, updated_A_hat, E, M = lp_criterion(embeddings, reliable_positives, reliable_negatives)
 
             # 4) Contrastive Loss
             contrast_criterion = ContrastiveLoss(margin=margin,num_pairs=5*data.num_nodes).to(device)
@@ -375,6 +375,9 @@ def main(
           - "ratio"
           - "lpl_weight"
           - "treatment"
+          - "sampling_mode"
+          - "num_neighbors"
+          - "model_type"
         The exact usage depends on the GraphSAGE and training process.
     device : torch.device
         The device (CPU/GPU) on which computations will be performed.
@@ -397,6 +400,18 @@ def main(
     in_channels = data.num_node_features
     # Build the GraphSAGE model
     model = GraphSAGEEncoder(
+        in_channels=in_channels,
+        hidden_channels=params["hidden_channels"],
+        out_channels=params["out_channels"],
+        num_layers=params["num_layers"],
+        dropout=params["dropout"],
+        norm=params["norm"],
+        aggregation=params["aggregation"]
+    )
+    sampler = Sampler(params['sampling_mode'], params['num_neighbors'])
+    model = GraphEncoder(
+        model_type=params["model_type"],
+        sampler=sampler,
         in_channels=in_channels,
         hidden_channels=params["hidden_channels"],
         out_channels=params["out_channels"],
@@ -450,6 +465,9 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
           "pos_weight": float,
           "aggregation": str,
           "treatment": str,
+          "sampling_mode": str,
+          "num_neighbors": int,
+          "model_type": str,
           "seeds": int,            # number of repeated runs
           "output_csv": str        # path to CSV file
         }
@@ -477,6 +495,9 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
     pos_weight = params["pos_weight"]
     aggregation = params["aggregation"]
     treatment = params["treatment"]
+    sampling_mode=params['sampling_mode']
+    num_neighbors=params['num_neighbors']
+    model_type=params["model_type"]
 
     n_seeds = params["seeds"]
     output_csv = params["output_csv"]
@@ -506,7 +527,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
         writer = csv.writer(csvfile)
         writer.writerow([
             "alpha", "K", "layers", "hidden_channels", "out_channels", "norm",
-            "dropout", "margin", "lpl_weight", "ratio", "seed", "aggregation",
+            "dropout", "margin", "lpl_weight", "ratio", "seed", "aggregation","model_type","sampling_mode","num_neighbors",
             "pos_weight", "accuracy", "f1", "recall", "precision"
         ])
 
@@ -547,7 +568,10 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 "lpl_weight": lpl_weight,
                 "margin": margin,
                 "ratio": ratio,
-                "treatment":treatment
+                "treatment":treatment,
+                "sampling_mode":sampling_mode,
+                "num_neighbors":num_neighbors,
+                "model_type":model_type
             }
             model, train_losses, A_hat = main(data, train_params, device)
 
@@ -564,24 +588,28 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 high_score_anomaly=True
             )
             norm_emb = F.normalize(embeddings, dim=1)
-            features_np = norm_emb.detach().cpu().numpy()
-            y_labels = data.train_mask.detach().cpu().numpy().astype(int)
+            if not torch.isnan(norm_emb).any():
+                features_np = norm_emb.detach().cpu().numpy()
+                y_labels = data.train_mask.detach().cpu().numpy().astype(int)
 
-            # Fit PNN on the labeled/unlabeled data
-            pnn_model.fit(features_np, y_labels)
-            predicted = pnn_model.predict(features_np)
-            predicted_t = torch.from_numpy(predicted).to(embeddings.device)
+                # Fit PNN on the labeled/unlabeled data
+                pnn_model.fit(features_np, y_labels)
+                predicted = pnn_model.predict(features_np)
+                predicted_t = torch.from_numpy(predicted).to(embeddings.device)
 
-            # Determine reliable neg/pos
-            reliable_negatives = (predicted_t == 0)
-            reliable_positives = (predicted_t == 1)
+                # Determine reliable neg/pos
+                reliable_negatives = (predicted_t == 0)
+                reliable_positives = (predicted_t == 1)
 
-            # Combine them for "training" data
-            combined_mask = reliable_positives | reliable_negatives
-            train_labels = torch.zeros_like(combined_mask, dtype=torch.float)
-            train_labels[reliable_negatives] = 0.0
-            train_labels[reliable_positives] = 1.0
-            train_labels = train_labels[combined_mask]
+                # Combine them for "training" data
+                combined_mask = reliable_positives | reliable_negatives
+                train_labels = torch.zeros_like(combined_mask, dtype=torch.float)
+                train_labels[reliable_negatives] = 0.0
+                train_labels[reliable_positives] = 1.0
+                train_labels = train_labels[combined_mask]
+            else:
+                train_labels = data.train_mask
+                print("NaN values in node embeddings! Using training labels...")
 
             # 6) Compute metrics against the ground truth
             labels_np = data.y.cpu().numpy()           # ground truth
@@ -598,7 +626,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
             # 7) Write row to CSV
             writer.writerow([
                 alpha, K, layers, hidden_channels, out_channels, norm, dropout,
-                margin, lpl_weight, ratio, seed, aggregation, pos_weight,
+                margin, lpl_weight, ratio, seed, aggregation,model_type, sampling_mode,num_neighbors ,pos_weight,
                 accuracy, f1, recall, precision
             ])
 

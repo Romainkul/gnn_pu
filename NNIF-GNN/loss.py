@@ -202,7 +202,7 @@ class LabelPropagationLoss(nn.Module):
 
         total_loss = self.pos_weight * pos_loss + neg_loss
         self.A_hat = updated_A_hat
-        return total_loss, updated_A_hat, E
+        return total_loss, updated_A_hat, E, mask
     
 ##############################################################################
 # Contrastive Loss
