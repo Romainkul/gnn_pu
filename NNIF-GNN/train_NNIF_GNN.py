@@ -149,7 +149,7 @@ def train_graph(
     margin: float = 0.5,
     pos_weight: float = 1.0,
     lpl_weight: float = 0.5,
-    num_epochs: int = 10,
+    num_epochs: int = 100,
     lr: float = 0.001,
     weight_decay: float = 1e-6,
     reliable_mini_batch: bool = False)->List[float]:
@@ -158,14 +158,18 @@ def train_graph(
     contrast_criterion = ContrastiveLoss(margin=margin).to(device)
     early_stopping = EarlyStopping_GNN(patience=20)
     model = model.to(device)
-
-    train_loader = NeighborLoader(
-        data,
-        num_neighbors=[-1]*K,
-        batch_size=1028,
-        shuffle=True)
-
+    data.n_id = torch.arange(data.num_nodes)
     data = data.to(device)
+    from torch_geometric.loader import ClusterData, ClusterLoader
+    cluster_data = ClusterData(data.cpu(), num_parts=1500)
+    train_loader = ClusterLoader(cluster_data, batch_size=batch_size, shuffle=True)
+    """    train_loader = NeighborLoader(
+            data,
+            num_neighbors=[-1]*K,
+            batch_size=1028,
+            shuffle=True)"""
+
+
 
     optimizer = optim.AdamW(list(model.parameters())
         + list(lp_criterion.parameters())
@@ -189,7 +193,7 @@ def train_graph(
                 num_sub_nodes = global_nids.shape[0]
                 sub_A = SparseTensor.from_edge_index(
                     subdata.edge_index,
-                    sparse_sizes=(num_sub_nodes, num_sub_nodes)).coalesce()
+                    sparse_sizes=(num_sub_nodes, num_sub_nodes)).coalesce().to(device)
 
                 optimizer.zero_grad()
                 with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -240,6 +244,12 @@ def train_graph(
                     lp_loss, E = lp_criterion(sub_emb, sub_A, sub_pos, sub_neg)
                     contrast_loss = contrast_criterion(sub_emb, E, num_pairs=sub_emb.size(0) * 7)
                     loss = lpl_weight * lp_loss + (1.0 - lpl_weight) * contrast_loss
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+
+                total_loss_epoch += loss.item()
         else:
             if epoch == 0:
                 model.eval()
@@ -248,7 +258,7 @@ def train_graph(
                 full_A = SparseTensor.from_edge_index(
                     data.edge_index,
                     sparse_sizes=(num_nodes, num_nodes)
-                ).coalesce()
+                ).coalesce().to(device)
 
                 with torch.no_grad(), autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
                     full_emb = model(data.x, full_A)
@@ -277,7 +287,7 @@ def train_graph(
                 sub_A = SparseTensor.from_edge_index(
                     subdata.edge_index,
                     sparse_sizes=(num_sub_nodes, num_sub_nodes)
-                ).coalesce()
+                ).coalesce().to(device)
 
                 optimizer.zero_grad()
                 with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -293,11 +303,11 @@ def train_graph(
                     contrast_loss = contrast_criterion(sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs)
                     loss = lpl_weight * lp_loss + (1.0 - lpl_weight) * contrast_loss
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
-        total_loss_epoch += loss.item()
+                total_loss_epoch += loss.item()
 
         losses_per_epoch.append(total_loss_epoch)
 
@@ -561,7 +571,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                     shuffle=False
                 )
 
-            emb_dim = model(data.x, data.edge_index).shape[1]
+            emb_dim = model(data.x.to(device), data.edge_index.to(device)).shape[1]
             embeddings = torch.zeros(data.num_nodes, emb_dim)
 
             with torch.no_grad():
@@ -630,7 +640,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 margin, lpl_weight, ratio, seed, aggregation, model_type, pos_weight,batch_size,rate_pairs,
                 accuracy, f1, recall, precision, train_losses, average_precision, roc_auc, fpr, tpr, roc_thresholds, precisions, recalls, pr_thresholds
             ])
-            
+
             if f1 < min:
                 print(f"F1 = {f1:.2f} < {min}, skipping ...")
                 break

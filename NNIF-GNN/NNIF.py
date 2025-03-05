@@ -60,7 +60,7 @@ class WeightedIsoForest(OutlierMixin, BaseBagging):
         Fraction of features to draw from X to train each base estimator.
     bootstrap : bool, default=False
         Whether samples are drawn with replacement.
-    n_jobs : int, default=None
+    n_jobs : int, default=-1
         Number of jobs for parallel processing. 
     behaviour : str, default='deprecated'
         Placeholder for older scikit-learn versions; ignored in recent versions.
@@ -101,7 +101,7 @@ class WeightedIsoForest(OutlierMixin, BaseBagging):
         contamination="auto",
         max_features=1.0,
         bootstrap=False,
-        n_jobs=None,
+        n_jobs=-1,
         behaviour='deprecated',
         random_state=None,
         verbose=0,
