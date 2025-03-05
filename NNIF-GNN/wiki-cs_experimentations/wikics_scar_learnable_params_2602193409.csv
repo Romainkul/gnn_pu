@@ -1,2 +1,0 @@
-alpha,K,layers,hidden_channels,out_channels,norm,dropout,margin,lpl_weight,ratio,seed,aggregation,pos_weight,accuracy,f1,recall,precision
-0.5,40,2,256,128,,0.4453,0.5,0.6237826273527834,0.09987236788097459,1,sum,1,0.9468421502435689,0.875,0.8126166480029862,0.9477579451458424

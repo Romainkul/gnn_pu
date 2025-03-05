@@ -5,19 +5,22 @@ import datetime
 import random
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score
+from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve, precision_recall_curve
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
 from torch_geometric.utils import add_self_loops, coalesce
 from torch_geometric.data import Data
+from torch_geometric.loader import NeighborLoader
 from torch_sparse import SparseTensor
 from typing import Dict, Tuple, List, Any
 import logging
+import copy
 
 from loss import LabelPropagationLoss, ContrastiveLoss
 from NNIF import PNN, ReliableValues, WeightedIsoForest
-from encoder import GraphSAGEEncoder, GraphEncoder, Sampler
+from encoder import GraphSAGEEncoder, GraphEncoder
 from data_generating import load_dataset, make_pu_dataset
 
 logger = logging.getLogger(__name__)
@@ -135,183 +138,179 @@ class EarlyStopping_GNN:
 ##############################################################################
 def train_graph(
     model,
-    data,
+    data: Data,
     device: torch.device,
-    alpha: float,
-    K: int,
-    treatment: str,
-    margin: float,
-    pos_weight: float,
+    alpha: float = 0.5,
+    K: int = 5,
+    treatment: str = "removal",
+    rate_pairs: int = 5,
+    batch_size: int = 1028,
     ratio: float = 0.1,
+    margin: float = 0.5,
+    pos_weight: float = 1.0,
     lpl_weight: float = 0.5,
-    num_epochs: int = 500,
-    lr: float = 0.01,
-    max_grad_norm: float = 1.0,
-    weight_decay: float = 1e-6
-):
-    """
-    Train a GraphSAGE-based model with a Label Propagation + Contrastive Loss workflow.
+    num_epochs: int = 10,
+    lr: float = 0.001,
+    weight_decay: float = 1e-6,
+    reliable_mini_batch: bool = False)->List[float]:
 
-    The main steps are:
-      1) Construct an adjacency (A_hat) from data.edge_index, including self-loops.
-      2) Forward pass to get node embeddings.
-      3) Anomaly detection => retrieve reliable positives/negatives.
-      4) Label Propagation loss.
-      5) Contrastive loss.
-      6) Combine losses, backprop, and update parameters.
-      7) (Optional) Early stopping.
-
-    Parameters
-    ----------
-    model : nn.Module
-        A GraphSAGEEncoder or similar model that produces embeddings.
-    data : torch_geometric.data.Data
-        PyG Data object with fields like data.x, data.edge_index, etc.
-    device : torch.device
-        The device (CPU/GPU) for training.
-    alpha : float
-        Parameter for label propagation (mixing factor).
-    K : int
-        Number of label propagation steps.
-    treatment : str
-        String indicating treatment for anomaly detection (passed to ReliableValues).
-    margin : float
-        Margin used in the contrastive loss.
-    pos_weight : float
-        Weight for positive loss in label propagation.
-    ratio : float, default=0.1
-        Fraction of negative samples to treat as anomalies (used in anomaly detector).
-    lpl_weight : float, default=0.5
-        Fraction of total loss allocated to the label propagation term 
-        (the other 1 - lpl_weight goes to contrastive).
-    num_epochs : int, default=500
-        Maximum number of training epochs.
-    lr : float, default=0.01
-        Learning rate for the AdamW optimizer.
-    max_grad_norm : float, default=1.0
-        Gradient norm clipping threshold.
-    weight_decay : float, default=1e-6
-        Weight decay (L2 regularization) for AdamW.
-
-    Returns
-    -------
-    train_losses : list of float
-        The recorded training losses at each epoch.
-    final_A_hat : SparseTensor
-        Potentially updated adjacency after label propagation steps.
-    """
-    from torch.nn.utils import clip_grad_norm_  # local import for clarity
-
-    optimizer = optim.Adam(model.parameters())#, lr=lr, weight_decay=weight_decay)
-    """    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=0.002,
-        steps_per_epoch=1,
-        epochs=num_epochs
-    )"""
+    lp_criterion = LabelPropagationLoss(alpha=alpha, K=K, pos_weight=pos_weight).to(device)
+    contrast_criterion = ContrastiveLoss(margin=margin).to(device)
     early_stopping = EarlyStopping_GNN(patience=20)
-    scaler = GradScaler()
-
-    # Step 1: Build adjacency with self-loops
-    #edge_index, _ = add_self_loops(data.edge_index, num_nodes=data.num_nodes)
-    #edge_index = coalesce(edge_index)
-    A_hat = SparseTensor.from_edge_index(data.edge_index).coalesce().to(device)
-
-
-    # Tracking variables
-    train_losses = []
-    best_loss = float('inf')
-
-    # Move model to device
     model = model.to(device)
 
+    train_loader = NeighborLoader(
+        data,
+        num_neighbors=[-1]*K,
+        batch_size=1028,
+        shuffle=True)
+
+    data = data.to(device)
+
+    optimizer = optim.AdamW(list(model.parameters())
+        + list(lp_criterion.parameters())
+        + list(contrast_criterion.parameters()),
+        lr=lr, weight_decay=weight_decay)
+    
+    scaler = GradScaler()
+
+    losses_per_epoch=[]
+
+    reliable_pos_set = set()
+    reliable_neg_set = set()
+
     for epoch in range(num_epochs):
-        #print_cuda_meminfo(f"Epoch {epoch} start")
-
         model.train()
-        optimizer.zero_grad()
+        total_loss_epoch = 0.0
+        if reliable_mini_batch:
+            for subdata in train_loader:
+                subdata = subdata.to(device)
+                global_nids = subdata.n_id
+                num_sub_nodes = global_nids.shape[0]
+                sub_A = SparseTensor.from_edge_index(
+                    subdata.edge_index,
+                    sparse_sizes=(num_sub_nodes, num_sub_nodes)).coalesce()
 
-        with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
-            # 2) Forward pass with current adjacency
-            embeddings = model(data.x.to(device), A_hat)
-            #print_cuda_meminfo(f"Epoch {epoch} after forward")
-            # Anomaly detection => reliable positives/negatives
+                optimizer.zero_grad()
+                with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+                    sub_emb = model(subdata.x, sub_A)
+
+                    # Compute reliable values per mini-batch in epoch 0
+                    if epoch == 0:
+                        # Normalize embeddings and extract features for the mini-batch
+                        norm_sub_emb = F.normalize(sub_emb, dim=1)
+                        features_np = norm_sub_emb.detach().cpu().numpy()
+                        # Assuming subdata contains a train_mask field for this mini-batch
+                        y_labels = subdata.train_mask.detach().cpu().numpy().astype(int)
+
+                        NNIF = ReliableValues(
+                            method=treatment,
+                            treatment_ratio=ratio,
+                            anomaly_detector=WeightedIsoForest(n_estimators=200),
+                            random_state=42,
+                            high_score_anomaly=True
+                        )
+                        # Compute reliable values on the mini-batch embeddings
+                        mini_reliable_neg_mask, mini_reliable_pos_mask = NNIF.get_reliable(features_np, y_labels)
+
+                        # Convert boolean masks to mini-batch relative indices
+                        sub_pos_idx = [i for i in range(num_sub_nodes) if mini_reliable_pos_mask[i]]
+                        sub_neg_idx = [i for i in range(num_sub_nodes) if mini_reliable_neg_mask[i]]
+
+                        # Save corresponding global node IDs to the global reliable sets
+                        global_ids_np = global_nids.detach().cpu().numpy()
+                        for i in range(num_sub_nodes):
+                            if mini_reliable_pos_mask[i]:
+                                reliable_pos_set.add(int(global_ids_np[i]))
+                            if mini_reliable_neg_mask[i]:
+                                reliable_neg_set.add(int(global_ids_np[i]))
+
+                    else:
+                        # For epochs > 0, you may reuse the reliable sets computed from the first epoch.
+                        # Here, we assume that the reliable sets for the mini-batch are determined by comparing
+                        # the global ids to a stored reliable set computed in epoch 0. If you wish to recompute
+                        # them per mini-batch at every epoch, you could replicate the code above.
+                        global_ids_np = global_nids.detach().cpu().numpy()
+                        sub_pos_idx = [i for i, gid in enumerate(global_ids_np) if gid in reliable_pos_set]
+                        sub_neg_idx = [i for i, gid in enumerate(global_ids_np) if gid in reliable_neg_set]
+
+                    sub_pos = torch.tensor(sub_pos_idx, dtype=torch.long, device=device)
+                    sub_neg = torch.tensor(sub_neg_idx, dtype=torch.long, device=device)
+
+                    lp_loss, E = lp_criterion(sub_emb, sub_A, sub_pos, sub_neg)
+                    contrast_loss = contrast_criterion(sub_emb, E, num_pairs=sub_emb.size(0) * 7)
+                    loss = lpl_weight * lp_loss + (1.0 - lpl_weight) * contrast_loss
+        else:
             if epoch == 0:
-                NNIF = ReliableValues(
-                    method=treatment,
-                    treatment_ratio=ratio,
-                    anomaly_detector=WeightedIsoForest(n_estimators=200),
-                    random_state=42,
-                    high_score_anomaly=True,
-                )
-                norm_emb = F.normalize(embeddings, dim=1)
-                features_np = norm_emb.detach().cpu().to(torch.float32).numpy()
-                y_labels = data.train_mask.detach().cpu().numpy().astype(int)
-                reliable_negatives, reliable_positives = NNIF.get_reliable(features_np, y_labels)
+                model.eval()
+                data = data.to(device)
+                num_nodes = data.x.size(0)
+                full_A = SparseTensor.from_edge_index(
+                    data.edge_index,
+                    sparse_sizes=(num_nodes, num_nodes)
+                ).coalesce()
 
-            # 3) Label Propagation
-            lp_criterion = LabelPropagationLoss(
-                A_hat=A_hat,
-                alpha=alpha,
-                K=K,
-                pos_weight=pos_weight
-                ).to(device)
-            lpl_loss, updated_A_hat, E, M = lp_criterion(embeddings, reliable_positives, reliable_negatives)
+                with torch.no_grad(), autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+                    full_emb = model(data.x, full_A)
+                    norm_full_emb = F.normalize(full_emb, dim=1)
+                    features_np = norm_full_emb.detach().cpu().numpy()
+                    y_labels = data.train_mask.detach().cpu().numpy().astype(int)
 
-            # 4) Contrastive Loss
-            contrast_criterion = ContrastiveLoss(margin=margin,num_pairs=5*data.num_nodes).to(device)
-            contrastive_loss = contrast_criterion(embeddings, E)
+                    NNIF = ReliableValues(
+                        method=treatment,
+                        treatment_ratio=ratio,
+                        anomaly_detector=WeightedIsoForest(n_estimators=200),
+                        random_state=42,
+                        high_score_anomaly=True
+                    )
+                    global_reliable_neg_mask, global_reliable_pos_mask = NNIF.get_reliable(features_np, y_labels)
 
-            # 5) Combine losses
-            loss = lpl_weight * lpl_loss + (1.0 - lpl_weight) * contrastive_loss
+                    reliable_pos_set = set(np.where(global_reliable_pos_mask)[0].tolist())
+                    reliable_neg_set = set(np.where(global_reliable_neg_mask)[0].tolist())
 
-        # Backprop
-        scaler.scale(loss).backward(retain_graph=True)
-        #print_cuda_meminfo(f"Epoch {epoch} after backward")
+                model.train()
 
-        # Gradient clipping
-        if max_grad_norm > 0:
-            scaler.unscale_(optimizer)
-            clip_grad_norm_(model.parameters(), max_grad_norm)
+            for subdata in train_loader:
+                subdata = subdata.to(device)
+                global_nids = subdata.n_id
+                num_sub_nodes = global_nids.shape[0]
+                sub_A = SparseTensor.from_edge_index(
+                    subdata.edge_index,
+                    sparse_sizes=(num_sub_nodes, num_sub_nodes)
+                ).coalesce()
 
-        # Optimizer step
+                optimizer.zero_grad()
+                with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+                    sub_emb = model(subdata.x, sub_A)
+                    global_ids_np = global_nids.detach().cpu().numpy()
+                    sub_pos_idx = [i for i, gid in enumerate(global_ids_np) if gid in reliable_pos_set]
+                    sub_neg_idx = [i for i, gid in enumerate(global_ids_np) if gid in reliable_neg_set]
+
+                    sub_pos = torch.tensor(sub_pos_idx, dtype=torch.long, device=device)
+                    sub_neg = torch.tensor(sub_neg_idx, dtype=torch.long, device=device)
+
+                    lp_loss, E = lp_criterion(sub_emb, sub_A, sub_pos, sub_neg)
+                    contrast_loss = contrast_criterion(sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs)
+                    loss = lpl_weight * lp_loss + (1.0 - lpl_weight) * contrast_loss
+
+        scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        #scheduler.step()
 
-        # Record loss
-        loss_val = loss.item()
-        train_losses.append(loss_val)
+        total_loss_epoch += loss.item()
 
-        if loss_val < best_loss:
-            best_loss = loss_val
+        losses_per_epoch.append(total_loss_epoch)
 
-        # 6) Update adjacency (if needed)
-        A_hat = updated_A_hat
-        # Example: If you need to re-inject self-loops:
-        # A_hat = add_self_loops_to_sparse(A_hat).coalesce()
 
-        # Logging
-        if epoch % 50 == 0:
-            print(
-                f"Epoch {epoch}, Loss: {loss_val:.4f}, "
-                f"LPL: {lpl_loss.item():.4f}, Contrastive: {contrastive_loss.item():.4f}"
-            )
-            logger.info(
-                f"Epoch {epoch}, Loss: {loss_val:.4f}, "
-                f"LPL: {lpl_loss.item():.4f}, Contrastive: {contrastive_loss.item():.4f}"
-            )
-
-        # Early stopping check
-        if early_stopping(loss_val):
+        # Early stopping
+        if early_stopping(total_loss_epoch):
             logger.info(f"Early stopping at epoch {epoch}")
             break
-        if torch.isnan(loss).any():
-            break
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}, Loss: {total_loss_epoch:.4f}")
 
-        # Optional: print(torch.cuda.memory_summary())
+    return losses_per_epoch
 
-    return train_losses, A_hat
 
 ##############################################################################
 # Set Seed
@@ -338,6 +337,25 @@ def set_seed(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+def generate_random_numbers(n:int=5, seed:int=42, a:int=0, b:int=1000) -> List[float]:
+    """
+    Generates a list of n random numbers using the provided seed.
+
+    Parameters:
+        n (int): Number of random numbers to generate.
+        Seed (int): Seed for the random number generator.
+        a (int): Lower bound (inclusive).
+        b (int): Upper bound (inclusive).
+
+    Returns:
+        List[float]: A list containing n random numbers between 0 and 1.
+    """
+    # Set the random state for reproducibility
+    set_seed(seed)
+    
+    # Generate and return a list of n random numbers
+    return [random.randint(a,b) for _ in range(n)]
+
 ##############################################################################
 # Main
 ##############################################################################
@@ -358,7 +376,9 @@ def main(
           - data.x (node features)
           - data.edge_index (graph structure)
           - data.num_node_features
-          - Optionally other fields like data.train_mask, etc.
+          - data.y (node labels)
+          - data.train_mask (node mask for training)
+          - data.test_mask (node mask for testing)
     params : dict
         Dictionary of hyperparameters with keys such as:
           - "hidden_channels"
@@ -375,9 +395,10 @@ def main(
           - "ratio"
           - "lpl_weight"
           - "treatment"
-          - "sampling_mode"
-          - "num_neighbors"
           - "model_type"
+          - "batch size"
+          - "rate_pairs"
+          - "reliable_mini_batch"
         The exact usage depends on the GraphSAGE and training process.
     device : torch.device
         The device (CPU/GPU) on which computations will be performed.
@@ -398,31 +419,20 @@ def main(
 
     # Prepare model input size
     in_channels = data.num_node_features
+
     # Build the GraphSAGE model
-    model = GraphSAGEEncoder(
-        in_channels=in_channels,
-        hidden_channels=params["hidden_channels"],
-        out_channels=params["out_channels"],
-        num_layers=params["num_layers"],
-        dropout=params["dropout"],
-        norm=params["norm"],
-        aggregation=params["aggregation"]
-    )
-    sampler = Sampler(params['sampling_mode'], params['num_neighbors'])
     model = GraphEncoder(
-        model_type=params["model_type"],
-        sampler=sampler,
-        in_channels=in_channels,
-        hidden_channels=params["hidden_channels"],
-        out_channels=params["out_channels"],
-        num_layers=params["num_layers"],
-        dropout=params["dropout"],
-        norm=params["norm"],
-        aggregation=params["aggregation"]
-    )
-    #print(params)
+            model_type=params["model_type"],
+            in_channels=in_channels,
+            hidden_channels=params["hidden_channels"],
+            out_channels=params["out_channels"],
+            num_layers=params["num_layers"],
+            dropout=params["dropout"],
+            norm=params["norm"],
+            aggregation=params["aggregation"])
+
     # Train the model
-    train_losses, final_A_hat = train_graph(
+    train_losses = train_graph(
         model=model,
         data=data,
         device=device,
@@ -432,52 +442,18 @@ def main(
         pos_weight=params["pos_weight"],
         ratio=params["ratio"],
         lpl_weight=params["lpl_weight"],
-        treatment=params["treatment"]
+        treatment=params["treatment"],
+        rate_pairs=params["rate_pairs"],
+        batch_size=params["batch_size"],
+        reliable_mini_batch=params["reliable_mini_batch"]
     )
 
-    return model, train_losses, final_A_hat
+    return model, train_losses
 
 ##############################################################################
 # Experiment Loop
 ##############################################################################
 def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
-    """
-    Run a single experiment configuration for NNIF + GNN, looping only over 
-    random seeds from 1..params['seeds'].
-
-    All parameters are given via `params`, a dictionary that must contain:
-
-        {
-          "dataset_name": str,
-          "train_pct": float,
-          "mechanism": str,
-
-          "alpha": float,
-          "K": int,
-          "layers": int,
-          "hidden_channels": int,
-          "out_channels": int,
-          "norm": str or None,
-          "dropout": float,
-          "margin": float,
-          "lpl_weight": float,
-          "ratio": float,
-          "pos_weight": float,
-          "aggregation": str,
-          "treatment": str,
-          "sampling_mode": str,
-          "num_neighbors": int,
-          "model_type": str,
-          "seeds": int,            # number of repeated runs
-          "output_csv": str        # path to CSV file
-        }
-
-    Returns
-    -------
-    (avg_f1, std_f1) : (float, float)
-        The mean F1 score and standard deviation of F1 over all repeated seeds.
-    """
-    # Unpack parameters from dict
     dataset_name = params["dataset_name"]
     train_pct = params["train_pct"]
     mechanism = params["mechanism"]
@@ -495,20 +471,21 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
     pos_weight = params["pos_weight"]
     aggregation = params["aggregation"]
     treatment = params["treatment"]
-    sampling_mode=params['sampling_mode']
-    num_neighbors=params['num_neighbors']
-    model_type=params["model_type"]
+    model_type = params["model_type"]
+    rate_pairs = params["rate_pairs"]
+    batch_size = params["batch_size"]
+    reliable_mini_batch=params["reliable_mini_batch"]
+    min=params["min"]
 
     n_seeds = params["seeds"]
-    output_csv = params["output_csv"]
 
+    f1_scores = []
+
+    # Prepare output folder and CSV
     output_folder = f"{dataset_name}_experimentations"
     os.makedirs(output_folder, exist_ok=True)
-    
-    # Get the output file name from parameters
+
     base_output_csv = params["output_csv"]
-    
-    # Append current day, month, hour, and second to the CSV filename
     timestamp = datetime.datetime.now().strftime("%d%m%H%M%S")
     if "." in base_output_csv:
         base, ext = base_output_csv.rsplit(".", 1)
@@ -516,27 +493,24 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
     else:
         output_csv = os.path.join(output_folder, f"{base_output_csv}_{timestamp}.csv")
 
-    # Decide on CPU or GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    seeds=generate_random_numbers(n=n_seeds)
 
-    # For storing F1 scores across all seeds
-    f1_scores = []
-
-    # Open the CSV file once, write all seeds' results inside
     with open(output_csv, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow([
             "alpha", "K", "layers", "hidden_channels", "out_channels", "norm",
-            "dropout", "margin", "lpl_weight", "ratio", "seed", "aggregation","model_type","sampling_mode","num_neighbors",
-            "pos_weight", "accuracy", "f1", "recall", "precision"
+            "dropout", "margin", "lpl_weight", "ratio", "seed", "aggregation",
+            "model_type", "sampling_mode", "num_neighbors", "pos_weight","batch_size","rate_pairs","reliable_mini_batch"
+            "accuracy", "f1", "recall", "precision","losses","average_precision","roc_auc","fpr","tpr","roc_thresholds","precisions","recalls","pr_thresholds"
         ])
-
-        # Loop over seeds for repeated runs
-        for seed in range(1, n_seeds + 1):
-            # --- 1) Load dataset ---
+        
+        for seed in seeds:
+            # 1) Load dataset
             data = load_dataset(dataset_name)
 
-            # --- 2) Create a PU dataset (some positives labeled) ---
+            # 2) Create PU dataset
             data = make_pu_dataset(
                 data,
                 mechanism=mechanism,
@@ -547,14 +521,15 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
             data = data.to(device)
             if torch.isnan(data.x).any():
                 print("NaN values in node features! Skipping seed...")
+                continue
 
-            # Print parameters for reference
             print(f"Running experiment with seed={seed}:")
             print(f" - alpha={alpha}, K={K}, layers={layers}, hidden={hidden_channels}, out={out_channels}")
             print(f" - norm={norm}, dropout={dropout}, margin={margin}, lpl_weight={lpl_weight}")
             print(f" - ratio={ratio}, pos_weight={pos_weight}, aggregation={aggregation}, treatment={treatment}")
+            print(f" - model_type={model_type}, rate_pairs={rate_pairs}, batch_size={batch_size}, reliable_mini_batch={reliable_mini_batch}")
 
-            # --- 3) Train GNN with these parameters ---
+            # 3) Train
             train_params = {
                 "aggregation": aggregation,
                 "pos_weight": pos_weight,
@@ -568,16 +543,35 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 "lpl_weight": lpl_weight,
                 "margin": margin,
                 "ratio": ratio,
-                "treatment":treatment,
-                "sampling_mode":sampling_mode,
-                "num_neighbors":num_neighbors,
-                "model_type":model_type
+                "treatment": treatment,
+                "model_type": model_type,
+                "rate_pairs": rate_pairs,
+                "batch_size": batch_size,
+                "reliable_mini_batch": reliable_mini_batch
             }
-            model, train_losses, A_hat = main(data, train_params, device)
-
+            model, train_losses = main(data, train_params, device)
+            A_hat = SparseTensor.from_edge_index(data.edge_index).coalesce().to(device)
             # --- 4) Evaluate the trained GNN: get embeddings ---
             model.eval()
-            embeddings = model(data.x, A_hat)
+            loader = NeighborLoader(
+                    copy.copy(data),
+                    input_nodes=data.test_mask,
+                    num_neighbors=[-1]*K,
+                    batch_size=2056,
+                    shuffle=False
+                )
+
+            emb_dim = model(data.x, data.edge_index).shape[1]
+            embeddings = torch.zeros(data.num_nodes, emb_dim)
+
+            with torch.no_grad():
+                for batch in loader:
+                    # Move the batch to the proper device
+                    batch = batch.to(device)
+                    # Compute embeddings for the batch
+                    batch_emb = model(batch.x, batch.edge_index)
+                    # batch.n_id contains the global node indices for the batch.
+                    embeddings[batch.n_id] = batch_emb.cpu()
 
             # --- 5) PU/NNIF approach ---
             pnn_model = PNN(
@@ -587,7 +581,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 random_state=42,         # or pass `seed` if needed
                 high_score_anomaly=True
             )
-            norm_emb = F.normalize(embeddings, dim=1)
+            norm_emb = F.normalize(embeddings[data.test_mask.cpu()], dim=1)
             if not torch.isnan(norm_emb).any():
                 features_np = norm_emb.detach().cpu().numpy()
                 y_labels = data.train_mask.detach().cpu().numpy().astype(int)
@@ -595,6 +589,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 # Fit PNN on the labeled/unlabeled data
                 pnn_model.fit(features_np, y_labels)
                 predicted = pnn_model.predict(features_np)
+                predicted_probs = pnn_model.predict_proba(features_np)[:,1]
                 predicted_t = torch.from_numpy(predicted).to(embeddings.device)
 
                 # Determine reliable neg/pos
@@ -612,29 +607,42 @@ def run_nnif_gnn_experiment(params: Dict[str, Any]) -> Tuple[float, float]:
                 print("NaN values in node embeddings! Using training labels...")
 
             # 6) Compute metrics against the ground truth
-            labels_np = data.y.cpu().numpy()           # ground truth
+            labels_np = data.y[data.test_mask].cpu().numpy()           # ground truth
             preds_np = train_labels.cpu().numpy()      # predicted
             accuracy = accuracy_score(labels_np, preds_np)
             f1 = f1_score(labels_np, preds_np)
             recall = recall_score(labels_np, preds_np)
             precision = precision_score(labels_np, preds_np)
 
+            average_precision = average_precision_score(labels_np, predicted_probs)
+            roc_auc = roc_auc_score(labels_np, predicted_probs)
+            fpr, tpr, roc_thresholds = roc_curve(labels_np, predicted_probs)
+            precisions, recalls, pr_thresholds = precision_recall_curve(labels_np, predicted_probs)
+            
             f1_scores.append(f1)  # Track F1 across seeds
 
             print(f" - Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
 
-            # 7) Write row to CSV
+            # Otherwise record results
+            f1_scores.append(f1)
             writer.writerow([
                 alpha, K, layers, hidden_channels, out_channels, norm, dropout,
-                margin, lpl_weight, ratio, seed, aggregation,model_type, sampling_mode,num_neighbors ,pos_weight,
-                accuracy, f1, recall, precision
+                margin, lpl_weight, ratio, seed, aggregation, model_type, pos_weight,batch_size,rate_pairs,
+                accuracy, f1, recall, precision, train_losses, average_precision, roc_auc, fpr, tpr, roc_thresholds, precisions, recalls, pr_thresholds
             ])
+            
+            if f1 < min:
+                print(f"F1 = {f1:.2f} < {min}, skipping ...")
+                break
 
-    # After all seeds, compute mean & std of F1
-    avg_f1 = float(np.mean(f1_scores)) if f1_scores else 0.0
-    std_f1 = float(np.std(f1_scores)) if f1_scores else 0.0
+    # Summarize results
+    if len(f1_scores) > 0:
+        avg_f1 = float(np.mean(f1_scores))
+        std_f1 = float(np.std(f1_scores))
+    else:
+        avg_f1, std_f1 = 0.0, 0.0
 
     print(f"Done. Results written to {output_csv}.")
-    print(f"Average F1 over {n_seeds} seeds: {avg_f1:.4f} ± {std_f1:.4f}")
+    print(f"Average F1 over valid seeds: {avg_f1:.4f} ± {std_f1:.4f}")
 
     return avg_f1, std_f1
