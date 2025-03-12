@@ -14,12 +14,11 @@ class LabelPropagationLoss(nn.Module):
     with a learnable alpha in (0, 1).
     Returns both the scalar loss and the final label distribution E.
     """
-    def __init__(self, alpha=0.5, K=5, pos_weight=1.0):
+    def __init__(self, K=5,alpha=0.5):
         super().__init__()
         # raw_alpha is a learnable parameter that we map to (0,1) via sigmoid
         self.raw_alpha = nn.Parameter(torch.tensor(alpha))
         self.K = K
-        self.pos_weight = pos_weight
 
     def forward(self, embeddings, sub_A: SparseTensor, sub_pos, sub_neg):
         """
@@ -60,7 +59,7 @@ class LabelPropagationLoss(nn.Module):
         pos_loss = -torch.log(pos_probs).mean() if len(sub_pos) > 0 else 0.0
         neg_loss = -torch.log(neg_probs).mean() if len(sub_neg) > 0 else 0.0
 
-        lp_loss = self.pos_weight * pos_loss + neg_loss
+        lp_loss = pos_loss + neg_loss
         return lp_loss, E
     
 ##############################################################################
@@ -82,7 +81,6 @@ class ContrastiveLoss(nn.Module):
         super().__init__()
         # Use a raw margin parameter and map it to a positive value via softplus.
         self.raw_margin = nn.Parameter(torch.tensor(margin))
-        #self.num_pairs = num_pairs
 
     def forward(self, embeddings: torch.Tensor, E: torch.Tensor, num_pairs: int) -> torch.Tensor:
         device = embeddings.device

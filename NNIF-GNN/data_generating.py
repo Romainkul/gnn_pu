@@ -231,6 +231,7 @@ def get_elliptic_bitcoin(dataset_name: str,
         data: torch_geometric.data.Data
             A PyG Data object with reindexed edges and node features.
     """
+    import pandas as pd
     # -----------------------------
     # (1) Load Node Features
     # -----------------------------
@@ -267,19 +268,11 @@ def get_elliptic_bitcoin(dataset_name: str,
     # (3) Load Labels
     # -----------------------------
     # The classes file: we assume it provides labels in the same order as the features file.
-    y_str = np.loadtxt(path + r"\elliptic_txs_classes.csv",
-                       delimiter=",", skiprows=1, usecols=(1), dtype=str)
-    mapped_labels = []
-    for row in y_str:
-        if row == "1":
-            mapped_labels.append(0)  # Map '1' to class 0
-        elif row == "2":
-            mapped_labels.append(1)  # Map '2' to class 1
-        else:
-            mapped_labels.append(2)  # Map unknown to class 2
-    y_mapped = torch.tensor(mapped_labels, dtype=torch.long)
+    y_df = pd.read_csv(path + r"\elliptic_txs_classes.csv",
+                       delimiter=",", usecols=(0,1), dtype=str)
+    label_mapping = {"1": 0, "2": 1}
+    y_mapped = torch.tensor(y_df.iloc[:, 1].map(lambda x: int(x) - 1 if x in label_mapping else 2).values, dtype=torch.long)
     num_classes = y_mapped.max().item() + 1
-    print(y_mapped.size())
     # -----------------------------
     # (4) Reindex Additional Attributes
     # -----------------------------
@@ -479,7 +472,6 @@ def make_pu_dataset(
     # unlabeled => y=2 => test_mask=0
     known_mask = (data.y == 0) | (data.y == 1)
     data.test_mask[known_mask] = True
-
     # Store the prior => fraction of positives among all nodes
     data.prior = (data.y == 1).sum().item() / float(n_nodes)
 
