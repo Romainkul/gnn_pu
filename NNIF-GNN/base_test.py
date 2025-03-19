@@ -5,70 +5,34 @@ from torch.nn.utils import clip_grad_norm_
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
 
-# For classical ML
+# Classical ML
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
-from sklearn.metrics import (
-    precision_score,
-    recall_score,
-    f1_score,
-    average_precision_score
-)
+from sklearn.metrics import precision_score, recall_score, f1_score, average_precision_score
 
-# PyG imports
+# PyG
 from torch_geometric.data import Data
-from torch_geometric.loader import NeighborLoader
 
-# Custom imports (assumed to exist)
+# Custom modules (assumed to exist in your environment)
 from encoder import GraphEncoder
-from nnpu import PULoss
+from nnpu import PULoss  # Not used if a two-step approach is selected
 from data_generating import load_dataset, make_pu_dataset
 from NNIF import PNN, ReliableValues, WeightedIsoForest, SpyEM
+from TED import run_tedn_training
 
+###############################################################################
+# EarlyStopping_GNN
+###############################################################################
 class EarlyStopping_GNN:
     """
-    Implements an early stopping mechanism for GNN training.
-
-    The criterion checks:
-      1) If the absolute difference between the current and previous loss 
-         is below a specified threshold (loss_diff_threshold), or
-      2) If the current loss is worse (higher) than the best loss so far,
-
-    then it increments a patience counter. If the counter exceeds the 'patience'
-    value, training is flagged to stop.
-
-    Additionally, if a new best loss is found that improves by more than 'delta',
-    the counter resets to 0.
-
-    Parameters
-    ----------
-    patience : int, default=50
-        Number of epochs to wait after the last improvement.
-    delta : float, default=0.0
-        Minimum absolute improvement in loss to reset the patience counter.
-    loss_diff_threshold : float, default=5e-4
-        Threshold for considering the current loss “close enough” 
-        to the previous loss.
-
-    Attributes
-    ----------
-    best_loss : float
-        Tracks the best (lowest) loss encountered so far.
-    counter : int
-        Counts how many epochs have passed without sufficient improvement.
-    early_stop : bool
-        Flag that becomes True once patience is exceeded.
-    previous_loss : float or None
-        Stores the last epoch's loss to compare with the current loss.
+    Implements an early-stopping mechanism for GNN or neural training.
+    Stop conditions:
+      - The absolute difference in consecutive epoch losses < 'loss_diff_threshold', OR
+      - The current loss is worse (greater) than the best so far.
+    If either is triggered for 'patience' consecutive epochs, training is flagged to stop.
     """
-
-    def __init__(
-        self,
-        patience: int = 50,
-        delta: float = 0.0,
-        loss_diff_threshold: float = 5e-4
-    ) -> None:
+    def __init__(self, patience=50, delta=0.0, loss_diff_threshold=5e-4):
         self.patience = patience
         self.delta = delta
         self.loss_diff_threshold = loss_diff_threshold
@@ -78,25 +42,12 @@ class EarlyStopping_GNN:
         self.previous_loss = None
 
     def __call__(self, loss: float) -> bool:
-        """
-        Update state given the current loss, and decide whether to early-stop.
-
-        Parameters
-        ----------
-        loss : float
-            The loss value from the current epoch.
-
-        Returns
-        -------
-        bool
-            True if the criterion suggests stopping; False otherwise.
-        """
         if self.previous_loss is None:
             self.previous_loss = loss
 
         loss_diff = abs(self.previous_loss - loss)
 
-        # Check if the current loss is essentially unchanged or worse
+        # Condition: if loss hasn't improved much or is worse than best so far
         if (loss_diff < self.loss_diff_threshold) or (loss > self.best_loss):
             self.counter += 1
             if self.counter >= self.patience:
@@ -106,13 +57,14 @@ class EarlyStopping_GNN:
 
         self.previous_loss = loss
 
-        # If there's a sufficiently large improvement over the best_loss, reset
+        # If there's a sufficiently large improvement, reset
         if loss < (self.best_loss - self.delta):
             self.best_loss = loss
             self.counter = 0
 
         return self.early_stop
-    
+
+
 ###############################################################################
 # train_model
 ###############################################################################
@@ -125,160 +77,188 @@ def train_model(
     lr: float = 0.01,
     weight_decay: float = 5e-4,
     use_pu: bool = False,
-    prior: float = 0.5
-) -> list:
+    prior: float = 0.5,
+    use_tedn: bool = False,
+    tedn_kwargs: dict = None,
+    two_step: str = None,
+    ratio: float = 0.1
+):
     """
-    Trains either a classical ML model (RF, XGB, LogisticRegression) or a
-    neural network (MLP/GNN) on the given PyG Data object.
+    Trains either:
+      1) A classical ML model (RF, XGBoost, LogisticRegression), or
+      2) A PyTorch model (MLP/GNN) with optional:
+         - PU learning (PULoss) if two_step is None,
+         - TED^n approach (discarding top alpha fraction of unlabeled),
+         - 2-step approach (NNIF, IF, or Spy) at epoch 0, forced CrossEntropy afterwards.
 
     Parameters
     ----------
-    model       : Object
-        - If model_type is one of ["RandomForest", "LogisticRegression", "XGBoost"],
-          'model' should be a scikit-learn-like model (fit/predict methods).
-        - Otherwise, a PyTorch nn.Module (e.g., GraphEncoder).
-    data        : torch_geometric.data.Data
-        PyG Data with:
-          - data.x            (features)       [num_nodes, num_features]
-          - data.y            (labels)         [num_nodes]
-          - data.edge_index   (graph structure) [2, num_edges] (for GNNs)
-          - data.train_mask   (bool)           [num_nodes], optional
-          - data.test_mask    (bool)           [num_nodes], optional
-    device      : torch.device
-        The device (CPU or GPU) to run on.
-    model_type  : str
-        E.g., "RandomForest", "LogisticRegression", "XGBoost",
-               or "MLP", "GCNConv", "GATConv", "SAGEConv", "GINConv", etc.
-    num_epochs  : int, default=50
-        Number of training epochs (only for PyTorch models).
-    lr          : float, default=0.01
-        Learning rate (only for PyTorch models).
-    weight_decay: float, default=5e-4
-        Weight decay (L2 regularization) for PyTorch optimizers.
-    use_pu      : bool, default=False
-        If True, uses a PU learning loss (PULoss). If False, uses CrossEntropy.
-        Only applies to neural models.
-    prior       : float, default=0.5
+    model : object
+        - If in [\"RandomForest\", \"LogisticRegression\", \"XGBoost\"], a scikit-learn model.
+        - Else, a torch.nn.Module (e.g., GraphEncoder).
+    data : torch_geometric.data.Data
+        Must contain data.x, data.y, data.edge_index, and optionally data.train_mask.
+    device : torch.device
+    model_type : str
+        E.g. \"RandomForest\", \"GraphSAGE\", \"GINConv\", etc.
+    num_epochs : int
+        Number of epochs for neural training.
+    lr : float
+        Learning rate (only for neural models).
+    weight_decay : float
+        L2 reg (only for neural models).
+    use_pu : bool
+        If True, use PULoss. (Ignored if two_step is used.)
+    prior : float
         Class prior for PULoss if use_pu is True.
+    use_tedn : bool
+        If True, run TED^n. Must supply 'tedn_kwargs' with correct Tensors.
+    tedn_kwargs : dict
+        Additional arguments for run_tedn_training (e.g. alpha_init, etc.).
+    two_step : str
+        \"NNIF\", \"IF\", or \"Spy\" => apply once at epoch 0, then standard CE training.
+    ratio : float
+        Fraction of data to remove/relabel in two-step approach.
 
     Returns
     -------
     losses_per_epoch : list of float
-        The training loss recorded at each epoch (for neural models). An empty
-        list is returned for classical ML models.
+        Training losses per epoch (for neural models).
+        Empty list for classical ML models.
     """
-    # -----------------------------------------
-    # 1) Classical ML Models
-    # -----------------------------------------
+    ###################################################################
+    # 1) Handle classical ML
+    ###################################################################
     if model_type in ["RandomForest", "LogisticRegression", "XGBoost"]:
-        # For scikit-learn style models, we train only on train_mask
-        # (assuming it exists). If not, you might just use all nodes.
-        train_mask = data.train_mask if hasattr(data, "train_mask") else None
+        train_mask = getattr(data, "train_mask", None)
         if train_mask is not None:
             train_idx = train_mask.nonzero(as_tuple=True)[0]
         else:
-            # fallback: use all nodes
             train_idx = torch.arange(data.num_nodes)
 
-        # Move features/labels to CPU numpy
         X_train = data.x[train_idx].cpu().numpy()
         y_train = data.y[train_idx].cpu().numpy()
 
-        # Fit the model
         model.fit(X_train, y_train)
+        return []  # classical models do not provide training-loss
 
-        # We don't have a training "loss" from classical ML, so return empty list
-        return []
-
-    # -----------------------------------------
-    # 2) Neural Networks (MLP / GNN)
-    # -----------------------------------------
+    ###################################################################
+    # 2) Neural Model Setup
+    ###################################################################
     model = model.to(device)
     data = data.to(device)
 
-    # Identify training nodes
+    # Determine training indices
     if hasattr(data, "train_mask") and data.train_mask is not None:
         train_idx = data.train_mask.nonzero(as_tuple=True)[0]
     else:
-        # fallback: use all
         train_idx = torch.arange(data.num_nodes, device=device)
 
-    # Set up the loss function (CrossEntropy or PU)
-    if use_pu:
-        loss_fn = PULoss(prior=prior, gamma=1, beta=0, nnpu=True, imbpu=False).to(device)
+    # If a two-step approach is used => ALWAYS CrossEntropy
+    # Else use PULoss if 'use_pu' is True
+    if two_step in ["NNIF", "IF", "Spy"]:
+        loss_fn = nn.CrossEntropyLoss()  # forced CE
     else:
-        loss_fn = nn.CrossEntropyLoss()
+        if use_pu:
+            loss_fn = PULoss(prior=prior, gamma=1, beta=0, nnpu=True, imbpu=False).to(device)
+        else:
+            loss_fn = nn.CrossEntropyLoss()
 
-    # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    early_stopping = EarlyStopping_GNN(patience=20)
     scaler = GradScaler()
-    best_loss = float('inf')
+    early_stopper = EarlyStopping_GNN(patience=20)
     losses_per_epoch = []
+    max_grad_norm = 1.0
 
-    reliable_negatives, reliable_positives = None, None  # placeholders
-    max_grad_norm: float = 1.0
-    treatment: str = "removal"
-    ratio: float = 0.1
-    for epoch in range(num_epochs):
-        # ---------------------------------------------------------
-        # (A) Optionally extract reliable sets at epoch 0
-        # ---------------------------------------------------------
-        if epoch == 0:
-            model.eval()
-            with torch.no_grad():
-                # Get embeddings for all nodes
-                embeddings = model(data.x, data.edge_index)  # [num_nodes, embed_dim] presumably
-            # Normalize for the anomaly detector
-            norm_emb = F.normalize(embeddings, dim=1)
-            features_np = norm_emb.detach().cpu().numpy()
-            y_labels = data.train_mask.detach().cpu().numpy().astype(int)
+    ###################################################################
+    # 2A) If TED^n is requested, run it directly and return
+    ###################################################################
+    if use_tedn:
+        if tedn_kwargs is None:
+            tedn_kwargs = {}
+        run_tedn_training(
+            net=model,
+            device=device,
+            optimizer=optimizer,
+            criterion=loss_fn,
+            **tedn_kwargs
+        )
+        return []
 
-            # Use ReliableValues to find reliable neg/pos
-            NNIF = ReliableValues(
-                method=treatment,
+    ###################################################################
+    # 2B) Otherwise, do a standard training loop with optional two-step
+    ###################################################################
+    # Perform the two-step approach exactly at epoch 0 if requested
+    if two_step in ["NNIF", "IF", "Spy"]:
+        model.eval()
+        with torch.no_grad():
+            emb = model(data.x, data.edge_index)  # [num_nodes, embed_dim]
+        # Normalize for anomaly detection
+        emb_np = F.normalize(emb, dim=1).cpu().numpy()
+        y_np = data.y.cpu().numpy()  # or partial labels
+        # We'll define 3 placeholders to demonstrate
+        if two_step == "NNIF":
+            # e.g. remove or relabel outliers with WeightedIsoForest
+            nnif_model = ReliableValues(
+                method="removal",  # or "relabel"
                 treatment_ratio=ratio,
                 anomaly_detector=WeightedIsoForest(n_estimators=200),
                 random_state=42,
                 high_score_anomaly=True
             )
-            reliable_negatives, reliable_positives = NNIF.get_reliable(features_np, y_labels)
+            nnif_model.fit(emb_np, y_np)
+            # Possibly update data.y or remove certain nodes from the training set
+            # e.g., if nnif_model provides new pseudo-labels or excludes outliers
 
-            # Switch back to training mode
-            model.train()
+        elif two_step == "IF":
+            # WeightedIsoForest unweighted
+            if_model = PNN(
+                method="removal",  # or "relabel"
+                treatment_ratio=ratio,
+                anomaly_detector=WeightedIsoForest(n_estimators=200, type_weight='unweighted'),
+                random_state=42,
+                high_score_anomaly=True
+            )
+            if_model.fit(emb_np, y_np)
+            # Optionally mutate data.y or define new masks
 
-        # ---------------------------------------------------------
-        # (B) Standard forward + loss + backprop
-        # ---------------------------------------------------------
+        elif two_step == "Spy":
+            spy_model = SpyEM(spy_ratio=0.1, threshold=0.15, resampler=True, random_state=42)
+            spy_model.fit(emb_np, y_np)
+            # Possibly update data.y or define new masks
+
+        # After applying the two-step approach at epoch 0,
+        # training continues from epoch 1 onward with CrossEntropy
+        model.train()
+
+    # Now run the standard training loop for [1..num_epochs]
+    for epoch in range(num_epochs):
         model.train()
         optimizer.zero_grad()
-        with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
-            out = model(data.x, data.edge_index)  # shape: [num_nodes, out_dim]
 
-            # Squeeze if needed (e.g., if out is [..., 1])
+        with autocast(enabled=torch.cuda.is_available()):
+            out = model(data.x, data.edge_index)
             if out.dim() > 1 and out.size(-1) == 1:
                 out = out.squeeze(-1)
 
-            # Training loss only on the train mask
             loss = loss_fn(out[train_idx], data.y[train_idx])
 
         scaler.scale(loss).backward()
 
-        # Gradient clipping
-        if max_grad_norm > 0:
-            scaler.unscale_(optimizer)
-            clip_grad_norm_(model.parameters(), max_grad_norm)
+        # Optional gradient clipping
+        scaler.unscale_(optimizer)
+        clip_grad_norm_(model.parameters(), max_grad_norm)
 
-        # Optimizer step
         scaler.step(optimizer)
         scaler.update()
 
-        # Record loss
-        loss_val = loss.item()
-        losses_per_epoch.append(loss_val)
+        curr_loss = loss.item()
+        losses_per_epoch.append(curr_loss)
 
-        if loss_val < best_loss:
-            best_loss = loss_val
+        # Early stopping check
+        if early_stopper(curr_loss):
+            print(f"[EarlyStopping] Stopped at epoch {epoch+1} / {num_epochs}")
+            break
 
     return losses_per_epoch
 
@@ -286,63 +266,39 @@ def train_model(
 ###############################################################################
 # evaluate_model
 ###############################################################################
-def evaluate_model(
-    model,
-    data: Data,
-    device: torch.device,
-    model_type: str,
-) -> dict:
+def evaluate_model(model, data: Data, device: torch.device, model_type: str):
     """
-    Evaluates the model on the entire dataset (or a test split, if desired).
-
-    For classical models, it uses model.predict / model.predict_proba on all nodes.
-    For neural networks, it does a forward pass and obtains predictions.
-
-    Returns a dictionary of evaluation metrics: precision, recall, f1, avg_precision.
+    Evaluates the model on the entire dataset or a mask if desired,
+    returning {precision, recall, f1_score, avg_precision}.
     """
     data = data.to(device)
+
+    # Classical
     if model_type in ["RandomForest", "LogisticRegression", "XGBoost"]:
-        # Classical ML => predict on entire dataset or test_mask only
         X_all = data.x.cpu().numpy()
         y_all = data.y.cpu().numpy()
-
-        # Predict
         y_pred = model.predict(X_all)
         y_proba = model.predict_proba(X_all)[:, 1]
 
         prec = precision_score(y_all, y_pred, pos_label=1)
         rec = recall_score(y_all, y_pred, pos_label=1)
-        f1 = f1_score(y_all, y_pred, pos_label=1)
+        f1v = f1_score(y_all, y_pred, pos_label=1)
         ap = average_precision_score(y_all, y_proba)
+        return {"precision": prec, "recall": rec, "f1_score": f1v, "avg_precision": ap}
 
-        return {
-            "precision": prec,
-            "recall": rec,
-            "f1_score": f1,
-            "avg_precision": ap
-        }
-
-    # Neural model => forward pass
+    # Neural
     model.eval()
     with torch.no_grad():
-        out = model(data.x, data.edge_index)
-        # Predictions
+        out = model(data.x, data.edge_index)  # [num_nodes, 2]
         preds = out.argmax(dim=-1).cpu().numpy()
-        # Probabilities (assuming out is [N, 2])
         probs = F.softmax(out, dim=-1)[:, 1].cpu().numpy()
 
     y_all = data.y.cpu().numpy()
     prec = precision_score(y_all, preds, pos_label=1)
     rec = recall_score(y_all, preds, pos_label=1)
-    f1 = f1_score(y_all, preds, pos_label=1)
+    f1v = f1_score(y_all, preds, pos_label=1)
     ap = average_precision_score(y_all, probs)
-
-    return {
-        "precision": prec,
-        "recall": rec,
-        "f1_score": f1,
-        "avg_precision": ap
-    }
+    return {"precision": prec, "recall": rec, "f1_score": f1v, "avg_precision": ap}
 
 
 ###############################################################################
@@ -350,45 +306,36 @@ def evaluate_model(
 ###############################################################################
 def main():
     """
-    Example main routine showing how to:
-      1) Load/create the data
-      2) Make PU dataset
-      3) Pick model type
-      4) Train
+    Simple demonstration of:
+      1) Load dataset
+      2) Possibly create PU
+      3) Initialize model (classical or GNN)
+      4) Train (optionally with two-step or TED^n)
       5) Evaluate
     """
     dataset_name = 'citeseer'
     mechanism = 'SCAR'
     seed = 1
     train_pct = 0.5
-    model_type = "GraphSAGE"  # or "RandomForest", "LogisticRegression", "XGBoost", etc.
-    two_step = "NNIF"         # or "Spy"
+    model_type = "GraphSAGE"
+    use_pu = False
+    use_tedn = False
+    two_step = "NNIF"  # or "IF" or "Spy" or None
 
-    # --------------------------------------------------
-    # 1) Load and prepare data
-    # --------------------------------------------------
+    # 1) Load & create data
     data = load_dataset(dataset_name)
     data = make_pu_dataset(data, mechanism=mechanism, sample_seed=seed, train_pct=train_pct)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --------------------------------------------------
-    # 2) Construct the model
-    # --------------------------------------------------
+    # 2) Construct a model
     if model_type == "RandomForest":
         model = RandomForestClassifier()
     elif model_type == "LogisticRegression":
         model = LogisticRegression()
     elif model_type == "XGBoost":
         model = XGBClassifier()
-        
-    elif model_type == "NNIF":
-        # If you have a 2-step approach or specialized class
-        model = PNN(method=treatment,
-                treatment_ratio=ratio,
-                anomaly_detector=WeightedIsoForest(n_estimators=200),
-                random_state=42,
-                high_score_anomaly=True)
     else:
+        # e.g., GraphSAGE, GIN, GCN, etc.
         hidden_dim = 64
         output_dim = 2
         num_layers = 3
@@ -402,10 +349,7 @@ def main():
             model_type=model_type
         )
 
-    # --------------------------------------------------
     # 3) Train
-    # --------------------------------------------------
-    use_pu = False  # Set True if you want PULoss
     losses = train_model(
         model=model,
         data=data,
@@ -414,75 +358,18 @@ def main():
         num_epochs=50,
         lr=0.01,
         weight_decay=5e-4,
-        use_pu=use_pu
+        use_pu=use_pu,          # Ignored if two_step is used
+        prior=0.5,
+        use_tedn=use_tedn,
+        tedn_kwargs=None,       # if you'd like to pass args for run_tedn_training
+        two_step=two_step,
+        ratio=0.1
     )
 
-    # --------------------------------------------------
-    # 4) Possibly do a 2-step approach (NNIF, Spy, etc.)
-    # --------------------------------------------------
-    if two_step == "NNIF" and output_dim > 2:
-            model.eval()
-            embeddings = model(data.x, A_hat)
-
-            pnn_model = PNN(
-                method=treatment,
-                treatment_ratio=ratio,
-                anomaly_detector=WeightedIsoForest(n_estimators=200),
-                random_state=42,         # or pass `seed` if needed
-                high_score_anomaly=True
-            )
-            norm_emb = F.normalize(embeddings, dim=1)
-            features_np = norm_emb.detach().cpu().numpy()
-            y_labels = data.train_mask.detach().cpu().numpy().astype(int)
-
-            # Fit PNN on the labeled/unlabeled data
-            pnn_model.fit(features_np, y_labels)
-            predicted = pnn_model.predict(features_np)
-            proba = pnn_model.predict_proba(features_np)
-            predicted_t = torch.from_numpy(predicted).to(embeddings.device)
-    elif two_step == "IF" and output_dim > 2:
-        model.eval()
-            embeddings = model(data.x, A_hat)
-
-            # --- 5) PU/NNIF approach ---
-            pnn_model = PNN(
-                method=treatment,
-                treatment_ratio=ratio,
-                anomaly_detector=WeightedIsoForest(n_estimators=200,type_weight='unweighted'),
-                random_state=42,         # or pass `seed` if needed
-                high_score_anomaly=True
-            )
-            norm_emb = F.normalize(embeddings, dim=1)
-            features_np = norm_emb.detach().cpu().numpy()
-            y_labels = data.train_mask.detach().cpu().numpy().astype(int)
-
-            # Fit PNN on the labeled/unlabeled data
-            pnn_model.fit(features_np, y_labels)
-            predicted = pnn_model.predict(features_np)
-            proba = pnn_model.predict_proba(features_np)
-            predicted_t = torch.from_numpy(predicted).to(embeddings.device)
-    elif two_step == "Spy" and output_dim > 2:
-        model.eval()
-            embeddings = model(data.x, A_hat)
-
-            pnn_model = SpyEM(spy_ratio= 0.1, threshold= 0.15, resampler = True, random_state=42)
-            norm_emb = F.normalize(embeddings, dim=1)
-            features_np = norm_emb.detach().cpu().numpy()
-            y_labels = data.train_mask.detach().cpu().numpy().astype(int)
-
-            # Fit PNN on the labeled/unlabeled data
-            pnn_model.fit(features_np, y_labels)
-            predicted = pnn_model.predict(features_np)
-            proba = pnn_model.predict_proba(features_np)
-            predicted_t = torch.from_numpy(predicted).to(embeddings.device)
-
-    # --------------------------------------------------
-    # 5) Evaluate
-    # --------------------------------------------------
+    # 4) Evaluate
     metrics = evaluate_model(model, data, device, model_type)
-    print(f"\n{model_type} model metrics:")
+    print(f"\n[{model_type}] Final Metrics:")
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}")
 
-    # If you want to track or return something:
     return model, metrics, losses
