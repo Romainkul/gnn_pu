@@ -12,124 +12,324 @@ import torch.backends.cudnn as cudnn
 from torch_geometric.nn import GCNConv, GATConv, SAGEConv
 from transformers import AdamW
 from encoder import GraphEncoder
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
 
-from ..NNIF_GNN.data_generating import load_dataset, make_pu_dataset
-"""from algorithm import *
-from model_helper import *
-from estimator import *"""
+from data_generating import load_dataset, make_pu_dataset
 
-np.set_printoptions(suppress=True, precision=1)
+def p_probs(net, X_pos, device):
+    """
+    Probability that each sample in X_pos is class 0 (positive).
+    """
+    net.eval()
+    with torch.no_grad():
+        outputs = net(X_pos.to(device))
+        # Probability of 'positive' (index 0)
+        probs = torch.softmax(outputs, dim=-1)[:, 0]
+    return probs.cpu().numpy()
 
-# Argument Parsing
-parser = argparse.ArgumentParser(description="PU Learning Training")
-parser.add_argument("--lr", default=0.1, type=float, help="learning rate")
-parser.add_argument("--wd", default=5e-4, type=float, help="Weight decay")
-parser.add_argument("--momentum", default=0.9, type=float, help="SGD momentum")
-parser.add_argument("--data-type", type=str, help="Dataset type: graph")
-parser.add_argument("--train-method", type=str, help="Training algorithm to use: TEDn | CVIR | nnPU")
-parser.add_argument("--net-type", type=str, help="GCN | GAT | GraphSAGE")
-parser.add_argument("--epochs", type=int, default=5000, help="Training epochs")
-parser.add_argument("--seed", type=int, default=42, help="Random seed")
-parser.add_argument("--alpha", type=float, default=0.5, help="PU mixture proportion")
-parser.add_argument("--beta", type=float, default=0.5, help="Proportion of labeled data")
-parser.add_argument("--log-dir", type=str, default="logging_accuracy", help="Logging directory")
-parser.add_argument("--data-dir", type=str, default="data", help="Dataset directory")
-parser.add_argument("--optimizer", type=str, default="AdamW", help="Optimizer: SGD | Adam | AdamW")
+def u_probs(net, X_unlabeled, Y_unlabeled, device):
+    """
+    Probability that each sample in X_unlabeled is class 0 (positive),
+    plus the known/true targets in Y_unlabeled for alpha-estimation.
+    """
+    net.eval()
+    with torch.no_grad():
+        outputs = net(X_unlabeled.to(device))
+        probs = torch.softmax(outputs, dim=-1)
+    return probs.cpu().numpy(), Y_unlabeled.numpy()
 
-args = parser.parse_args()
+def DKW_bound(x,y,t,m,n,delta=0.1, gamma= 0.01):
 
-# Set Random Seed
-torch.manual_seed(args.seed)
-torch.cuda.manual_seed(args.seed)
-np.random.seed(args.seed)
-random.seed(args.seed)
+    temp = np.sqrt(np.log(4/delta)/2/n) + np.sqrt(np.log(4/delta)/2/m)
+    bound = temp*(1+gamma)/(y/n)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-train_method = args.train_method
-data_type = args.data_type
-net_type = args.net_type
-alpha = args.alpha
-beta = args.beta
-epochs = args.epochs
-log_dir = os.path.join(args.log_dir, data_type)
-optimizer_str = args.optimizer
+    estimate = t
 
-# Dataset & Configuration
-hidden_dim = 64
-output_dim = 2  # Binary classification
-num_layers = 3
-dropout = 0.5
-model_type = "GCN"  # Default model type
-dataset_name = 'citeseer'
-mechanism = 'SCAR'
-seed = 1
-train_pct = 0.5
+    return estimate, t - bound, t + bound
 
-# Load dataset and create PU labels
-data = load_dataset(dataset_name)
-data = make_pu_dataset(data, mechanism=mechanism, sample_seed=seed, train_pct=train_pct)
 
-model = BaseEncoder(data.num_nodes, hidden_dim, output_dim, num_layers, dropout, model_type=model_type).to(device)
+def BBE_estimator(pdata_probs, udata_probs, udata_targets):
+    """
+    Breadth-Based Estimator for alpha, adapted from the approach that
+    ranks by predicted probabilities. 
+    
+    Args:
+        pdata_probs (ndarray): Prob(pos) for positive-labeled data.
+        udata_probs (ndarray): Nx2 array, each row is [prob(pos), prob(neg)] for unlabeled data.
+        udata_targets (ndarray): True 0/1 labels for that unlabeled subset (for alpha estimation).
+    
+    Returns:
+        float: estimated alpha
+    """
+    p_indices = np.argsort(pdata_probs)
+    sorted_p_probs = pdata_probs[p_indices]
+    u_indices = np.argsort(udata_probs[:,0])
+    sorted_u_probs = udata_probs[:,0][u_indices]
+    sorted_u_targets = udata_targets[u_indices]
 
-# Optimizer Selection
-criterion = nn.CrossEntropyLoss()
-if optimizer_str == "SGD":
-    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.wd)
-elif optimizer_str == "Adam":
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
-elif optimizer_str == "AdamW":
-    optimizer = AdamW(model.parameters(), lr=args.lr)
-else:
-    raise ValueError("Invalid optimizer. Choose from SGD, Adam, AdamW.")
+    sorted_u_probs = sorted_u_probs[::-1]
+    sorted_p_probs = sorted_p_probs[::-1]
+    sorted_u_targets = sorted_u_targets[::-1]
+    num = len(sorted_u_probs)
 
-# **TED (Two-step PU Learning)**
-def train_TED(model, x, edge_index, pos_idx, unlabeled_idx, optimizer, criterion, epochs):
-    model.train()
+    estimate_arr = []
+
+    upper_cfb = []
+    lower_cfb = []            
+
+    i = 0
+    j = 0
+    num_u_samples = 0
+
+    while (i < num):
+        start_interval =  sorted_u_probs[i]   
+        k = i 
+        if (i<num-1 and start_interval> sorted_u_probs[i+1]): 
+            pass
+        else: 
+            i += 1
+            continue
+        if (sorted_u_targets[i]==1):
+            num_u_samples += 1
+
+        while ( j<len(sorted_p_probs) and sorted_p_probs[j] >= start_interval):
+            j+= 1
+
+        if j>1 and i > 1:
+            t = (i)*1.0*len(sorted_p_probs)/j/len(sorted_u_probs)
+            estimate, lower , upper = DKW_bound(i, j, t, len(sorted_u_probs), len(sorted_p_probs))
+            estimate_arr.append(estimate)
+            upper_cfb.append( upper)
+            lower_cfb.append( lower)
+        i+=1
+
+    if (len(upper_cfb) != 0): 
+        idx = np.argmin(upper_cfb)
+        mpe_estimate = estimate_arr[idx]
+
+        return mpe_estimate, lower_cfb, upper_cfb
+    else: 
+        return 0.0, 0.0, 0.0
+
+def estimate_alpha_tedn(net, X_pos_val, Y_pos_val, X_unl_val, Y_unl_val, device):
+    """
+    Given a small validation set with known labels:
+      - P-labeled data (X_pos_val)
+      - U-labeled data (X_unl_val) but with ground-truth Y_unl_val
+    Returns an alpha estimate (float).
+    """
+    net.eval()
+    # Probability of positive for the small pos val set
+    pdata_probs = p_probs(net, X_pos_val, device)
+    # Probability + true labels for the unlabeled val set
+    udata_probs, udata_targets = u_probs(net, X_unl_val, Y_unl_val, device)
+    # Use BBE to estimate alpha
+    alpha_est = BBE_estimator(pdata_probs, udata_probs, udata_targets)
+    return alpha_est
+
+def rank_inputs(net, X_unlabeled, device, alpha):
+    """
+    Ranks unlabeled samples by predicted prob(pos) & discards the top alpha*N as negative.
+    Returns a 1D array `keep_samples` of 0/1.
+    """
+    net.eval()
+    with torch.no_grad():
+        outputs = net(X_unlabeled.to(device))
+        probs = torch.softmax(outputs, dim=-1)[:, 0].cpu().numpy()
+
+    N = len(probs)
+    sorted_idx = np.argsort(probs)  # ascending
+    cutoff = int(alpha * N)
+    
+    keep_samples = np.ones(N, dtype=int)
+    # Discard top alpha*N
+    keep_samples[sorted_idx[N - cutoff :]] = 0
+    return keep_samples
+
+def train_pu_discard(net, X_pos, Y_pos, X_unlabeled, Y_unlabeled,
+                     keep_samples, device, optimizer, criterion):
+    """
+    Single-epoch training step for TED(n): discard high-prob-likely-neg, 
+    then train on positives + the kept unlabeled portion.
+    """
+    net.train()
+    optimizer.zero_grad()
+
+    # Select unlabeled samples to keep
+    idx_keep = np.where(keep_samples == 1)[0]
+    X_keep = X_unlabeled[idx_keep]
+    Y_keep = Y_unlabeled[idx_keep]
+
+    # Combine all data for a single pass
+    X_all = torch.cat([X_pos, X_keep], dim=0).to(device)
+    Y_all = torch.cat([Y_pos, Y_keep], dim=0).to(device)
+
+    outputs = net(X_all)
+    # Split so we can log or handle them differently if needed
+    p_out = outputs[: len(X_pos)]
+    u_out = outputs[len(X_pos) :]
+
+    p_loss = criterion(p_out, Y_all[: len(X_pos)])
+    u_loss = criterion(u_out, Y_all[len(X_pos) :])
+    loss = 0.5 * (p_loss + u_loss)
+
+    loss.backward()
+    optimizer.step()
+
+    # Compute training accuracy
+    _, predicted = outputs.max(dim=1)
+    correct = (predicted == Y_all).sum().item()
+    total = Y_all.size(0)
+    return 100.0 * correct / total
+
+def run_tedn_training(
+    net,
+    X_pos, Y_pos,
+    X_unl, Y_unl,  # unlabeled data + pseudo-labels
+    X_pos_val, Y_pos_val,  # labeled positives for alpha estimation
+    X_unl_val, Y_unl_val,  # labeled 'unlabeled' for alpha estimation
+    device,
+    alpha_init=0.3,        # initial alpha
+    epochs=10,
+    optimizer=None,
+    criterion=None
+    ):
+    """
+    Runs a multi-epoch TED(n) training loop. 
+    Each epoch:
+      1. Optionally estimate alpha using a labeled validation set.
+      2. Discard top alpha*N unlabeled samples.
+      3. Train on positives + kept unlabeled.
+      4. Validate on your chosen set.
+
+    Args:
+        net (nn.Module): model
+        X_pos, Y_pos (Tensors): all-labeled positives and their labels (usually 0)
+        X_unl, Y_unl (Tensors): unlabeled data & pseudo-labels (0 or 1)
+        X_pos_val, Y_pos_val (Tensors): small labeled positive data for alpha estimation
+        X_unl_val, Y_unl_val (Tensors): small labeled 'unlabeled' data for alpha estimation
+        device (str): 'cpu' or 'cuda'
+        alpha_init (float): starting alpha
+        epochs (int): number of epochs
+        optimizer (torch.optim.Optimizer): an optimizer instance
+        criterion (nn.Module): e.g. nn.CrossEntropyLoss()
+        estimate_alpha_every (int): re-estimate alpha every N epochs
+
+    Returns:
+        None
+    """
+    alpha_used = alpha_init
+
     for epoch in range(epochs):
-        optimizer.zero_grad()
-        outputs = model(x, edge_index)
 
-        # Step 1: Rank Unlabeled Nodes & Remove Noisy Negatives
-        keep_samples, neg_reject = rank_inputs(epoch, model, x, edge_index, device, alpha, len(unlabeled_idx))
+        alpha_est = estimate_alpha_tedn(net, X_pos_val, Y_pos_val, X_unl_val, Y_unl_val, device)
+        alpha_used = alpha_est
 
-        # Step 2: Train with Selected Reliable Negatives
-        loss = criterion(outputs[pos_idx], torch.ones_like(pos_idx)) + \
-               criterion(outputs[unlabeled_idx[keep_samples]], torch.zeros_like(unlabeled_idx[keep_samples]))
+        # 2) Rank & discard unlabeled
+        keep_samples = rank_inputs(net, X_unl, device, alpha_used)
 
-        loss.backward()
-        optimizer.step()
+        # 3) Train
+        train_acc = train_pu_discard(net, X_pos, Y_pos, X_unl, Y_unl, keep_samples,
+                                     device, optimizer, criterion)
 
-        if epoch % 100 == 0:
-            print(f"Epoch {epoch}: Loss {loss.item()} | Negatives Rejected: {neg_reject:.4f}")
+        print(f"Epoch [{epoch+1}/{epochs}] - "
+              f"Alpha={alpha_used:.3f} | "
+              f"Train Acc={train_acc:.2f}% | ")
 
-# **BBE (Bias Bound Estimation)**
-def estimate_BBE(model, x, edge_index, pos_idx, unlabeled_idx):
-    model.eval()
-    with torch.no_grad():
-        pos_probs = F.softmax(model(x, edge_index), dim=-1)[pos_idx, 1]
-        unlabeled_probs = F.softmax(model(x, edge_index), dim=-1)[unlabeled_idx, 1]
 
-        mpe_estimate, _, _ = BBE_estimator(pos_probs.cpu().numpy(), unlabeled_probs.cpu().numpy(), np.zeros(len(unlabeled_idx)))
+if __name__ == '__main__':
+    seed = 42
 
-    return mpe_estimate
+    # Set Random Seed
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    model_type = "GCN"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    net_type = model_type
+    alpha = 0.2
+    beta = 0.5
+    epochs = 10
+    optimizer_str = "AdamW"
+    lr=0.01
+    wd=0.0
 
-# **Validation Function**
-def validate(model, x, edge_index, y, threshold=0.5):
-    model.eval()
-    with torch.no_grad():
-        outputs = model(x, edge_index)
-        preds = (F.softmax(outputs, dim=-1)[:, 1] > threshold).long()
-        correct = (preds == y).sum().item()
-        accuracy = correct / y.size(0)
-    return accuracy
+    # Dataset & Configuration
+    hidden_dim = 64
+    output_dim = 2  # Binary classification
+    num_layers = 3
+    dropout = 0.5
+    model_type = "GCN"  # Default model type
+    dataset_name = 'citeseer'
+    mechanism = 'SCAR'
+    seed = 1
+    train_pct = 0.5
 
-# **Training Execution**
-print("Starting Training...")
-if train_method == "TEDn":
-    train_TED(model, x, edge_index, pos_idx, unlabeled_idx, optimizer, criterion, epochs)
-    alpha_estimate = estimate_BBE(model, x, edge_index, pos_idx, unlabeled_idx)
-    print(f"Estimated Alpha (BBE): {alpha_estimate:.4f}")
+    # Load dataset and create PU labels
+    data = load_dataset(dataset_name)
+    data = make_pu_dataset(data, mechanism=mechanism, sample_seed=seed, train_pct=train_pct)
 
-# **Evaluating the Model**
-accuracy = validate(model, x, edge_index, y)
-print(f"Final Accuracy: {accuracy:.4f}")
+    model = GraphEncoder(data.num_nodes, hidden_dim, output_dim, num_layers, dropout, model_type=model_type).to(device)
+
+    # Optimizer Selection
+    criterion = nn.CrossEntropyLoss()
+
+    if optimizer_str == "SGD":
+        optimizer = optim.SGD(model.parameters(), lr=lr, weight_decay=wd)
+    elif optimizer_str == "Adam":
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+    elif optimizer_str == "AdamW":
+        optimizer = AdamW(model.parameters(), lr=lr)
+    else:
+        raise ValueError("Invalid optimizer. Choose from SGD, Adam, AdamW.")
+
+    net = nn.Sequential(
+        nn.Linear(100, 50),
+        nn.ReLU(),
+        nn.Linear(50, 2)
+    )
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    net.to(device)
+
+    # Suppose your data is loaded as entire Tensors
+    # X_pos, Y_pos : all-labeled positives (Y=0)
+    # X_unl, Y_unl : unlabeled + pseudo-labels (0 or 1)
+    # X_pos_val, Y_pos_val: small labeled positives for alpha estimation
+    # X_unl_val, Y_unl_val: small labeled 'unlabeled' set for alpha estimation
+
+    # (Below: just random Tensors as placeholders)
+    X_pos = torch.randn(200, 100)
+    Y_pos = torch.zeros(200, dtype=torch.long)  # e.g., class=0
+    X_unl = torch.randn(1000, 100)
+    # Pseudo-labels might all be 1 or some mixture
+    Y_unl = torch.ones(1000, dtype=torch.long)
+
+    # For alpha estimation, we need some ground truth in a 'validation' portion:
+    X_pos_val = torch.randn(50, 100)
+    Y_pos_val = torch.zeros(50, dtype=torch.long)
+    X_unl_val = torch.randn(50, 100)
+    Y_unl_val = torch.randint(0, 2, size=(50,))  # true 0 or 1
+
+    # Define optimizer and loss
+    optimizer = optim.SGD(net.parameters(), lr=0.01)
+    criterion = nn.CrossEntropyLoss()
+
+    # Run training
+    run_tedn_training(
+        net=net,
+        X_pos=X_pos, Y_pos=Y_pos,
+        X_unl=X_unl, Y_unl=Y_unl,
+        X_pos_val=X_pos_val, Y_pos_val=Y_pos_val,
+        X_unl_val=X_unl_val, Y_unl_val=Y_unl_val,
+        device=device,
+        alpha_init=0.3,
+        epochs=5,
+        optimizer=optimizer,
+        criterion=criterion,
+        estimate_alpha_every=1
+    )

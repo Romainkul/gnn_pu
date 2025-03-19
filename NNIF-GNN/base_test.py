@@ -22,7 +22,7 @@ from torch_geometric.loader import NeighborLoader
 
 # Custom imports (assumed to exist)
 from encoder import GraphEncoder
-from nnPU import PULoss
+from nnpu import PULoss
 from data_generating import load_dataset, make_pu_dataset
 from NNIF import PNN, ReliableValues, WeightedIsoForest, SpyEM
 
