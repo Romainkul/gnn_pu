@@ -465,6 +465,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
     clusters=params["clusters"]
     min=params["min"]
     n_seeds = params["seeds"]
+    num_epochs = params["num_epochs"]
 
     f1_scores = []
 
@@ -549,7 +550,8 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                         batch_size=batch_size,
                         lr=lr,
                         cluster=clusters,
-                        layers=layers
+                        layers=layers,
+                        num_epochs=num_epochs
                     )
                                     
                 elif methodology in ["rf", "xgboost", "logisticregression", "nnpu", "imbnnpu", "ted", "two_nnif", "two_if","two_spy"]:
