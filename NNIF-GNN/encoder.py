@@ -62,6 +62,7 @@ class GraphEncoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = dropout
         self.norm = norm
+        self.out_channels = out_channels
 
         if model_kwargs is None:
             model_kwargs = {}
