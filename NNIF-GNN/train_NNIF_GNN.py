@@ -151,7 +151,7 @@ def train_graph(
     lr: float = 0.001,
     weight_decay: float = 1e-6,
     cluster: int = 1500,
-    anomaly_detector: str = "nearest-neighbor",
+    anomaly_detector: str = "nearest_neighbors",
     layers: int = 3,
     sampling: str = "cluster",
     sampling_k: int = 10
@@ -195,7 +195,7 @@ def train_graph(
     layers : int
         Number of GNN layers in the model.
     anomaly_detector : str
-        Anomaly detector (e.g., 'nearest-neighbor' or 'unweighted').
+        Anomaly detector (e.g., 'nearest_neighbors' or 'unweighted').
     sampling : str
         Sampling method for NeighborLoader ('cluster', 'neighbor', or 'nearest_neighbor').
     sampling_k : int
@@ -360,7 +360,7 @@ def train_graph(
     loader = NeighborLoader(
         copy.copy(data),
         input_nodes=data.test_mask,
-        num_neighbors=[-1] * layers,
+        num_neighbors=[-1] * K,
         batch_size=2056,
         shuffle=False
     )
