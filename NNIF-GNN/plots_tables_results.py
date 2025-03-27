@@ -11,19 +11,21 @@ def experiment_varying_ratio_of_positives(ratio_list, fixed_params):
     fixed_params : dict of other params that remain constant
     """
     results = []
-    for ratio in ratio_list:
+    est_prior=fixed_params['ratio']/((1 - 0.5) + (fixed_params['ratio'] * 0.5))
+    for train_pct in ratio_list:
+        ratio=(est_prior-train_pct*est_prior)/(1-train_pct*est_prior)    
         # Merge ratio with the fixed parameters
-        exp_params = {**fixed_params, 'train_pct': ratio}
+        exp_params = {**fixed_params, 'train_pct': train_pct, 'ratio': ratio}
         
         # Call your training function
         f1,std = run_nnif_gnn_experiment(exp_params)
-        results.append((ratio, f1))
-        print(f"Ratio of Positives={ratio} => F1={f1:.4f}")
+        results.append((train_pct, f1))
+        print(f"Ratio of Positives={train_pct} => F1={f1:.4f}")
 
     # Plot results
-    ratios, accuracies = zip(*results)
+    ratios, f1 = zip(*results)
     plt.figure()
-    plt.plot(ratios, accuracies, marker='o')
+    plt.plot(ratios, f1, marker='o')
     plt.xlabel("Ratio of Positives")
     plt.ylabel("F1 Score")
     plt.title("F1 Score vs. Ratio of Positives")
