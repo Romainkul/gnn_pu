@@ -20,6 +20,7 @@ import copy
 from torch_geometric.loader import ClusterData, ClusterLoader, NeighborLoader
 from torch_geometric.transforms import KNNGraph
 
+from NN_loader import ShineLoader
 from loss import LabelPropagationLoss, ContrastiveLoss
 from NNIF import PNN, ReliableValues, WeightedIsoForest
 from encoder import GraphEncoder
@@ -153,8 +154,7 @@ def train_graph(
     cluster: int = 1500,
     anomaly_detector: str = "nearest_neighbors",
     layers: int = 3,
-    sampling: str = "cluster",
-    sampling_k: int = 10
+    sampling: str = "cluster"
 ) -> Tuple[torch.Tensor, torch.Tensor, List[float]]:
     """
     Trains a GNN model on the given graph data using Label Propagation + Contrastive Loss.
@@ -198,8 +198,6 @@ def train_graph(
         Anomaly detector (e.g., 'nearest_neighbors' or 'unweighted').
     sampling : str
         Sampling method for NeighborLoader ('cluster', 'neighbor', or 'nearest_neighbor').
-    sampling_k : int
-        Number of neighbors for 'nearest_neighbor' sampling.
 
     Returns
     -------
@@ -228,11 +226,10 @@ def train_graph(
             batch_size=20
         cluster_data = ClusterData(data.cpu(), num_parts=cluster)
         train_loader = ClusterLoader(cluster_data, batch_size=batch_size, shuffle=True)
-    elif sampling=="neighbor":
-        train_loader = NeighborLoader(data,num_neighbors=[25,10],batch_size=batch_size,shuffle=True)
-    elif sampling=="nearest_neighbors":
-        from NN_loader import ShineLoader
-        train_loader=ShineLoader(copy.copy(data),num_neighbors=[25,10], shuffle=True,batch_size=batch_size)
+    elif sampling=="sage":
+        train_loader = NeighborLoader(copy.copy(data),num_neighbors=[25,10],batch_size=batch_size,shuffle=True)
+    elif sampling=="shine":
+        train_loader = ShineLoader(copy.copy(data),num_neighbors=[2,32], shuffle=True,batch_size=batch_size,device=device)
     else:
         raise ValueError(f"Unknown sampling method: {sampling}")
 
@@ -263,7 +260,6 @@ def train_graph(
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0.0
-
         for sub_data in train_loader:
             sub_data = sub_data.to(device)
             global_nids = sub_data.n_id
@@ -297,7 +293,6 @@ def train_graph(
 
                     neg_mask, pos_mask = nnif_detector.get_reliable(features_np, y_labels)
                     global_ids_np = global_nids.cpu().numpy()
-
                     # Collect in global sets
                     for i in range(num_sub_nodes):
                         if pos_mask[i]:
@@ -321,7 +316,6 @@ def train_graph(
                     sub_neg_idx = [
                             i for i, gid in enumerate(global_ids_np) if gid in reliable_neg_set
                         ]
-
                 sub_pos = torch.tensor(sub_pos_idx, dtype=torch.long, device=device)
                 sub_neg = torch.tensor(sub_neg_idx, dtype=torch.long, device=device)
 
@@ -487,7 +481,6 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
     n_seeds = params["seeds"]
     num_epochs = params["num_epochs"]
     sampling = params["sampling"]
-    sampling_k = params["sampling_k"]
 
     f1_scores = []
 
@@ -519,7 +512,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
         writer = csv.writer(csvfile)
         writer.writerow([
             "K", "layers", "hidden_channels", "out_channels", "norm","lr","treatment",
-            "dropout", "ratio", "seed", "aggregation", "model_type","batch_size","rate_pairs","clusters","sampling",'sampling_k',"num_epochs","anomaly_detector",
+            "dropout", "ratio", "seed", "aggregation", "model_type","batch_size","rate_pairs","clusters","sampling","num_epochs","anomaly_detector",
             "accuracy", "f1", "recall", "precision","losses"
             ])
         
@@ -545,7 +538,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
             print(f"Running experiment with seed={exp_seed}:")
             print(f" - K={K}, layers={layers}, hidden={hidden_channels}, out={out_channels}")
             print(f" - norm={norm}, dropout={dropout}, batch_size={batch_size}, methodology={methodology}")
-            print(f" - ratio={ratio}, aggregation={aggregation}, treatment={treatment}, anomaly_detector={anomaly_detector}, sampling={sampling}, sampling_k={sampling_k}")
+            print(f" - ratio={ratio}, aggregation={aggregation}, treatment={treatment}, anomaly_detector={anomaly_detector}, sampling={sampling}")
             print(f" - model_type={model_type}, rate_pairs={rate_pairs}, clusters={clusters}, lr={lr}")
 
             try:
@@ -574,8 +567,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                         cluster=clusters,
                         layers=layers,
                         num_epochs=num_epochs,
-                        sampling=sampling,
-                        sampling_k=sampling_k
+                        sampling=sampling
                     )
                                     
                 elif methodology in ["rf", "xgboost", "logisticregression", "nnpu", "imbnnpu", "ted", "two_nnif", "two_if","two_spy"]:
@@ -598,7 +590,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 f1_scores.append(f1)
                 writer.writerow([
                         K, layers, hidden_channels, out_channels, norm, lr, treatment, dropout,
-                        ratio, exp_seed, aggregation, model_type, batch_size, rate_pairs,clusters,sampling,sampling_k,num_epochs,anomaly_detector,
+                        ratio, exp_seed, aggregation, model_type, batch_size, rate_pairs,clusters,sampling,num_epochs,anomaly_detector,
                         accuracy, f1, recall, precision, train_losses
                         ])
 
