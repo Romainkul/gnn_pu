@@ -231,10 +231,8 @@ def train_graph(
     elif sampling=="neighbor":
         train_loader = NeighborLoader(data,num_neighbors=[25,10],batch_size=batch_size,shuffle=True)
     elif sampling=="nearest_neighbors":
-        data_knn = copy.copy(data)
-        data_knn.pos = data.x
-        data_knn = KNNGraph(k=sampling_k)(data_knn)
-        train_loader = NeighborLoader(data_knn,num_neighbors=[sampling_k,sampling_k//2],batch_size=batch_size,shuffle=True)
+        from NN_loader import ShineLoader
+        train_loader=ShineLoader(copy.copy(data),num_neighbors=[25,10], shuffle=True,batch_size=batch_size)
     else:
         raise ValueError(f"Unknown sampling method: {sampling}")
 
