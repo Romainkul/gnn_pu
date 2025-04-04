@@ -216,83 +216,181 @@ def get_common_dataset(dataset_name: str) -> Data:
     data = dataset[0]
     return data
 
+import pandas as pd
+import torch
+from torch_geometric.data import Data
+
 def get_elliptic_bitcoin(dataset_name: str,
                          path: str = r"C:\Users\romai\Desktop\elliptic_bitcoin_dataset") -> Data:
     """
-    Loads the Elliptic Bitcoin dataset and reindexes node indices to start from 0.
+    Loads the Elliptic Bitcoin dataset and reindexes node indices to start from 0,
+    without relying on CSV row ordering. Uses only pandas for all I/O.
 
-    Parameters:
-        dataset_name: str
-            The name of the dataset (not used but kept for consistency).
-        path: str
-            Path to the dataset folder.
+    Parameters
+    ----------
+    dataset_name : str
+        The name of the dataset (not strictly used, but kept for consistency).
+    path : str
+        Path to the dataset folder, which should contain:
+          - elliptic_txs_features.csv
+          - elliptic_txs_edgelist.csv
+          - elliptic_txs_classes.csv
 
-    Returns:
-        data: torch_geometric.data.Data
-            A PyG Data object with reindexed edges and node features.
+    Returns
+    -------
+    data : torch_geometric.data.Data
+        PyG Data object with:
+            data.x            -> FloatTensor of shape [num_nodes, num_features]
+            data.y            -> LongTensor of shape [num_nodes] (0,1, or 2 if unknown)
+            data.edge_index   -> LongTensor of shape [2, E]
+            data.time         -> LongTensor of shape [num_nodes]
+            data.num_nodes    -> int
+            data.num_classes  -> int
+            data.index        -> LongTensor([0,1,...,num_nodes-1]) for reference
     """
-    import pandas as pd
-    # -----------------------------
-    # (1) Load Node Features
-    # -----------------------------
-    # Load the features file; first column is original node index,
-    # second column is timestamp, remaining columns are features.
-    features = np.loadtxt(path + r"\elliptic_txs_features.csv",
-                          delimiter=",", skiprows=0, usecols=range(0, 167),
-                          dtype=np.float32)
-    # Extract original node indices from the features file.
-    original_node_ids = features[:, 0].astype(np.int64)
-    # Create a complete list of nodes based on the features file.
-    unique_nodes = np.unique(original_node_ids)
-    # Mapping: original node id -> new sequential id (0 to num_nodes - 1)
-    node_mapping = {old_id: new_id for new_id, old_id in enumerate(unique_nodes)}
 
-    # Prepare node feature tensor (exclude the first two columns: index and timestamp)
-    x = torch.tensor(features[:, 2:], dtype=torch.float32)
-    # Timestamp is the second column.
-    time = torch.tensor(features[:, 1], dtype=torch.long)
-
-    # -----------------------------
-    # (2) Load Edge List (Transactions Graph)
-    # -----------------------------
-    # The edge list is an [N, 2] array.
-    edges = np.loadtxt(path + r"\elliptic_txs_edgelist.csv",
-                       delimiter=",", skiprows=1, usecols=(0, 1), dtype=np.int64)
-    # Map edges: ensure both source and target are in our mapping.
-    edges_mapped = np.array([[node_mapping[src], node_mapping[dst]]
-                             for src, dst in edges
-                             if src in node_mapping and dst in node_mapping])
-    edges_mapped = torch.tensor(edges_mapped, dtype=torch.long).t().contiguous()
-
-    # -----------------------------
-    # (3) Load Labels
-    # -----------------------------
-    # The classes file: we assume it provides labels in the same order as the features file.
-    y_df = pd.read_csv(path + r"\elliptic_txs_classes.csv",
-                       delimiter=",", usecols=(0,1), dtype=str)
-    label_mapping = {"1": 0, "2": 1}
-    y_mapped = torch.tensor(y_df.iloc[:, 1].map(lambda x: int(x) - 1 if x in label_mapping else 2).values, dtype=torch.long)
-    num_classes = y_mapped.max().item() + 1
-    # -----------------------------
-    # (4) Reindex Additional Attributes
-    # -----------------------------
-    # Create a tensor of new node indices for each row in the features file.
-    new_indices = torch.tensor([node_mapping[old_id] for old_id in original_node_ids],
-                               dtype=torch.long)
-
-    # -----------------------------
-    # (5) Create PyG Data Object
-    # -----------------------------
-    data = Data(
-        x=x,
-        edge_index=edges_mapped,
-        y=y_mapped,
-        num_nodes=y_mapped.size()[0],  # Total number of nodes from the features file.
-        num_classes=num_classes,
-        is_elliptic=True,
-        time=time,
-        index=new_indices  # New sequential node IDs for the features.
+    #----------------------------------------------------------------
+    # (1) Read elliptic_txs_features.csv using pandas
+    #    First col: node_id, second col: time, next 165 cols: features
+    #----------------------------------------------------------------
+    features_df = pd.read_csv(
+        f"{path}/elliptic_txs_features.csv",
+        header=None,        # No header row in original
+        dtype=float
     )
+    # Sanity check: the dataset typically has 167 columns:
+    #   0 -> node_id, 1 -> time, 2..166 -> 165 features
+    # Adjust if your file differs
+    assert features_df.shape[1] == 167, (
+        f"Expected 167 columns in features file, got {features_df.shape[1]}"
+    )
+
+    # Extract columns by position
+    # old_id  = col 0
+    # time    = col 1
+    # feats   = col 2..166
+    old_ids = features_df.iloc[:, 0].astype(int)
+    time_df = features_df.iloc[:, 1].astype(int)
+    feat_df = features_df.iloc[:, 2:].astype('float32')
+
+    # Create a sorted list of unique node IDs from the features
+    unique_nodes = sorted(old_ids.unique())
+    num_nodes = len(unique_nodes)
+
+    # Build a mapping: old_id -> new_id (0..num_nodes-1)
+    node_mapping = {old: i for i, old in enumerate(unique_nodes)}
+
+    #----------------------------------------------------------------
+    # (2) Reorder features/time so that row i corresponds to node i
+    #    (rather than relying on the CSV row positions)
+    #----------------------------------------------------------------
+    # Prepare empty tensors for x and time
+    num_features = feat_df.shape[1]
+    x_tensor = torch.zeros((num_nodes, num_features), dtype=torch.float32)
+    time_tensor = torch.zeros((num_nodes,), dtype=torch.long)
+
+    # Fill x_tensor[new_id], time_tensor[new_id] by matching old_id
+    # This loop could be vectorized, but for clarity we use itertuples
+    for row in features_df.itertuples(index=False):
+        old_id = int(row[0])
+        tstamp = int(row[1])
+        feats = row[2:]  # a tuple of feature values
+
+        new_id = node_mapping[old_id]
+        x_tensor[new_id] = torch.tensor(feats, dtype=torch.float32)
+        time_tensor[new_id] = tstamp
+
+    #----------------------------------------------------------------
+    # (3) Read elliptic_txs_classes.csv
+    #    Each row: node_id, label ( "1" => 0, "2" => 1, else => 2 )
+    #----------------------------------------------------------------
+    classes_df = pd.read_csv(
+        f"{path}/elliptic_txs_classes.csv",
+        delimiter=",",
+        header=0,
+        usecols=[0,1],
+        dtype=str
+    )
+    # Convert to dictionary: old_id -> label
+    label_dict = {}
+    for row in classes_df.itertuples(index=False):
+        old_id_str, label_str = row
+        old_id_int = int(old_id_str)
+        # Map '1' -> 0, '2' -> 1, else 2
+        if label_str == "1":
+            label_int = 0
+        elif label_str == "2":
+            label_int = 1
+        else:
+            label_int = 2  # unknown
+        label_dict[old_id_int] = label_int
+
+    # Now we build a y tensor of length num_nodes, default to 2 (unknown)
+    y_tensor = torch.full((num_nodes,), 2, dtype=torch.long)
+    for old_id, new_id in node_mapping.items():
+        # If the classes CSV has no entry for this old_id, it remains 2
+        if old_id in label_dict:
+            y_tensor[new_id] = label_dict[old_id]
+
+    num_classes = y_tensor.max().item() + 1  # might be 2 or 3, depending on data
+
+    #----------------------------------------------------------------
+    # (4) Read elliptic_txs_edgelist.csv with pandas; map edges
+    #----------------------------------------------------------------
+    edge_df = pd.read_csv(
+        f"{path}/elliptic_txs_edgelist.csv",
+        delimiter=",",
+        header=0,     # skip the original header row? If your file has a header
+        usecols=[0,1],
+        dtype=int
+    )
+    
+    # Map edges to (new_id_src, new_id_dst)
+    mapped_edges = []
+    problem_nodes = set()
+
+    for row in edge_df.itertuples(index=False):
+        src = row[0]
+        dst = row[1]
+        # If both src and dst are in node_mapping, keep the edge
+        if src in node_mapping and dst in node_mapping:
+            mapped_edges.append([node_mapping[src], node_mapping[dst]])
+        else:
+            # Track any node IDs not found in the feature set
+            if src not in node_mapping:
+                problem_nodes.add(src)
+            if dst not in node_mapping:
+                problem_nodes.add(dst)
+
+    if problem_nodes:
+        print(f"\n[WARNING] {len(problem_nodes)} node IDs appear in edges but not in features:")
+        # For debugging, uncomment:
+        # for pn in sorted(problem_nodes):
+        #     print(f"  - {pn}")
+
+    # Convert mapped_edges -> [2, E] LongTensor
+    if len(mapped_edges) > 0:
+        edge_index = torch.tensor(mapped_edges, dtype=torch.long).t().contiguous()
+    else:
+        # if your dataset may have zero valid edges
+        edge_index = torch.zeros((2, 0), dtype=torch.long)
+
+    edge_index_undirected = to_undirected(edge_index, num_nodes=num_nodes)
+    
+    #----------------------------------------------------------------
+    # (5) Create a PyG Data object
+    #----------------------------------------------------------------
+    data = Data(
+        x=x_tensor,                 # [num_nodes, num_features]
+        edge_index=edge_index_undirected,      # [2, E]
+        y=y_tensor,                 # [num_nodes]
+        time=time_tensor,           # [num_nodes]
+        num_nodes=num_nodes,
+        num_classes=num_classes,
+        is_elliptic=True
+    )
+    # Also store a quick reference "index" = [0..num_nodes-1] if you like
+    data.index = torch.arange(num_nodes, dtype=torch.long)
 
     return data
 

@@ -215,7 +215,6 @@ def train_graph(
     contrast_criterion = ContrastiveLoss().to(device)
     early_stopper = EarlyStopping_GNN(patience=20)
 
-    # Prepare cluster-based loader
     data.n_id = torch.arange(data.num_nodes)
     if sampling=="cluster":
         if batch_size==256:
@@ -224,7 +223,9 @@ def train_graph(
             batch_size=10
         elif batch_size==1024:
             batch_size=20
-        cluster_data = ClusterData(data.cpu(), num_parts=cluster)
+        #print(f"Batch size: {batch_size}")
+        cluster_data = ClusterData(data, num_parts=cluster)
+        #print(f"Number of clusters: {len(cluster_data)}")
         train_loader = ClusterLoader(cluster_data, batch_size=batch_size, shuffle=True)
     elif sampling=="sage":
         train_loader = NeighborLoader(copy.copy(data),num_neighbors=[25,10],batch_size=batch_size,shuffle=True)
@@ -232,7 +233,7 @@ def train_graph(
         train_loader = ShineLoader(copy.copy(data),num_neighbors=[2,32], shuffle=True,batch_size=batch_size,device=device)
     else:
         raise ValueError(f"Unknown sampling method: {sampling}")
-
+    #print(f"Number of batches: {len(train_loader)}")
     # Move model & data to device
     model = model.to(device)
     data = data.to(device)
@@ -527,10 +528,11 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 sample_seed=exp_seed,
                 train_pct=train_pct
             )
+            #print(data)
             # Prepare model input size
             in_channels = data.num_node_features
 
-            data = data.to(device)
+            #data = data.to(device)
             if torch.isnan(data.x).any():
                 print("NaN values in node features! Skipping seed...")
                 continue
