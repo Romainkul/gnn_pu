@@ -466,6 +466,7 @@ def make_pu_dataset(
     # Initialize masks
     n_nodes = data.y.size(0)
     data.train_mask = torch.zeros(n_nodes, dtype=torch.bool)
+    data.val_mask = torch.zeros(n_nodes, dtype=torch.bool)
     data.test_mask  = torch.zeros(n_nodes, dtype=torch.bool)
 
     # test_mask => all nodes with y in {0,1}
@@ -482,8 +483,8 @@ def make_pu_dataset(
         print("No positives found => skipping.")
         return data
 
-    train_pos_num = round(pos_num * train_pct)
-    train_pos_num = min(train_pos_num, pos_num)
+    pos_train_val = round(pos_num * train_pct)
+    train_pos_num = round(pos_train_val * 0.7)
 
     """    if fixed_seed:
             random.seed(sample_seed)
@@ -497,34 +498,37 @@ def make_pu_dataset(
     if mechanism.upper() == "SCAR":
         pos_list = pos_idx.tolist()
         random.shuffle(pos_list)
-        chosen_pos = torch.tensor(pos_list[:train_pos_num], dtype=torch.long)
+        chosen_pos = torch.tensor(pos_list[:pos_train_val], dtype=torch.long)
+        data.train_mask[chosen_pos[:train_pos_num]] = True
+        data.val_mask[chosen_pos] = True
 
     elif mechanism.upper() == "SAR":
         if data.x is None:
             raise ValueError("data.x is required for SAR distance-based approach.")
         neg_idx = (data.y == 0).nonzero(as_tuple=False).view(-1)
         if len(neg_idx) == 0:
-            chosen_pos = pos_idx[:train_pos_num]
+            chosen_pos = pos_idx[:pos_train_val]
         else:
             x_pos = data.x[pos_idx]
             x_neg = data.x[neg_idx]
             dist_matrix = torch.cdist(x_pos, x_neg, p=2)  # [pos_num, neg_num]
             dist_mean = dist_matrix.mean(dim=1) + 1e-8
             probs = dist_mean / dist_mean.sum()
-            chosen_ids = torch.multinomial(probs, num_samples=train_pos_num, replacement=False)
+            chosen_ids = torch.multinomial(probs, num_samples=pos_train_val, replacement=False)
             chosen_pos = pos_idx[chosen_ids]
+            data.train_mask[chosen_pos[:pos_train_val]] = True
+            data.val_mask[chosen_pos] = True
 
     elif mechanism.upper() == "SAR2" and hasattr(data, 'time'):
         if not hasattr(data, 'time'):
             raise ValueError("data.time is required for 'SAR2' approach.")
         pos_times = data.time[pos_idx]
         _, sorted_ids = torch.sort(pos_times, descending=False)
-        chosen_pos = pos_idx[sorted_ids[:train_pos_num]]
+        chosen_pos = pos_idx[sorted_ids[:pos_train_val]]
+        data.train_mask[chosen_pos[:train_pos_num]] = True
+        data.val_mask[chosen_pos] = True
 
     else:
-        raise ValueError(f"Invalid mechanism '{mechanism}'. Use 'SCAR', 'SAR' or 'SAR2'.")
-
-    # Mark chosen positives in train_mask
-    data.train_mask[chosen_pos] = True
+        raise ValueError(f"Invalid mechanism '{mechanism}'. Use 'SCAR', 'SAR' or 'SAR2'.")    
 
     return data

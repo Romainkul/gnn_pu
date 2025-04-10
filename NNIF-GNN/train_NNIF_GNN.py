@@ -290,7 +290,7 @@ def train_graph(
                     nnif_detector = ReliableValues(
                         method=treatment,
                         treatment_ratio=ratio,
-                        anomaly_detector=WeightedIsoForest(n_estimators=200, type_weight=anomaly_detector),
+                        anomaly_detector=WeightedIsoForest(n_estimators=100, type_weight=anomaly_detector),
                         random_state=42,
                         high_score_anomaly=True
                     )
@@ -378,7 +378,7 @@ def train_graph(
     pnn_model = PNN(
         method=treatment,
         treatment_ratio=ratio,
-        anomaly_detector=WeightedIsoForest(n_estimators=200, type_weight=anomaly_detector),
+        anomaly_detector=WeightedIsoForest(n_estimators=100, type_weight=anomaly_detector),
         random_state=42,
         high_score_anomaly=True
     )
@@ -583,13 +583,23 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                     train_labels, train_losses = train_baseline(**params)
 
                 # 6) Compute metrics against the ground truth
-                labels_np = data.y[data.test_mask].cpu().numpy()           # ground truth
-                preds_np = train_labels[data.test_mask.cpu()].cpu().numpy()      # predicted
+                labels_np = data.y[data.val_mask].cpu().numpy()           # ground truth
+                preds_np = train_labels[data.val_mask.cpu()].cpu().numpy()      # predicted
                 accuracy = accuracy_score(labels_np, preds_np)
                 f1 = f1_score(labels_np, preds_np)
                 recall = recall_score(labels_np, preds_np)
                 precision = precision_score(labels_np, preds_np)
-                    
+
+                labels_np_test = data.y[data.test_mask].cpu().numpy()           # ground truth
+                preds_np_test = train_labels[data.test_mask.cpu()].cpu().numpy()      # predicted
+                accuracy_test = accuracy_score(labels_np_test, preds_np_test)
+                f1_test = f1_score(labels_np_test, preds_np_test)
+                recall_test = recall_score(labels_np_test, preds_np_test)
+                precision_test = precision_score(labels_np_test, preds_np_test)
+                
+                print(f" - Test Metrics: Accuracy={accuracy_test:.4f}, F1={f1_test:.4f}, Recall={recall_test:.4f}, Precision={precision_test:.4f}")
+                print(f" - Validation Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
+
                 f1_scores.append(f1)  # Track F1 across seeds
 
                 print(f" - Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
