@@ -484,6 +484,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
     n_seeds = params["seeds"]
     num_epochs = params["num_epochs"]
     sampling = params["sampling"]
+    val=params["val"]
 
     f1_scores = []
 
@@ -528,7 +529,8 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 data,
                 mechanism=mechanism,
                 sample_seed=exp_seed,
-                train_pct=train_pct
+                train_pct=train_pct,
+                val=val
             )
             #print(data)
             # Prepare model input size
