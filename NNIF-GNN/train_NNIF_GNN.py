@@ -221,6 +221,8 @@ def train_graph(
             batch_size=5
         elif batch_size==512:
             batch_size=10
+        elif batch_size==768:
+            batch_size=15
         elif batch_size==1024:
             batch_size=20
         #print(f"Batch size: {batch_size}")
@@ -514,7 +516,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
         writer.writerow([
             "K", "layers", "hidden_channels", "out_channels", "norm","lr","treatment",
             "dropout", "ratio", "seed", "aggregation", "model_type","batch_size","rate_pairs","clusters","sampling","num_epochs","anomaly_detector",
-            "accuracy", "f1", "recall", "precision","losses"
+            "accuracy", "f1", "recall", "precision","losses", "test_accuracy", "test_f1", "test_recall", "test_precision"
             ])
         
         for exp_seed in seeds_list:
@@ -596,14 +598,14 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
 
                 f1_scores.append(f1)  # Track F1 across seeds
 
-                print(f" - Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
-
-                    # Otherwise record results
+                # Save the model if needed (optional)
+                # torch.save(model.state_dict(), f"model_seed_{exp_seed}.pth")
+                # Otherwise record results
                 f1_scores.append(f1)
                 writer.writerow([
                         K, layers, hidden_channels, out_channels, norm, lr, treatment, dropout,
                         ratio, exp_seed, aggregation, model_type, batch_size, rate_pairs,clusters,sampling,num_epochs,anomaly_detector,
-                        accuracy, f1, recall, precision, train_losses
+                        accuracy, f1, recall, precision, train_losses, accuracy_test, f1_test, recall_test, precision_test
                         ])
 
                 if f1 < min:

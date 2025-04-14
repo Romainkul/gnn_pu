@@ -582,7 +582,7 @@ def make_pu_dataset(
         return data
 
     pos_train_val = round(pos_num * train_pct)
-    train_pos_num = round(pos_train_val * 0.7)
+    train_pos_num = round(pos_train_val * 0.75)
 
     """    if fixed_seed:
             random.seed(sample_seed)
@@ -598,7 +598,7 @@ def make_pu_dataset(
         random.shuffle(pos_list)
         chosen_pos = torch.tensor(pos_list[:pos_train_val], dtype=torch.long)
         data.train_mask[chosen_pos[:train_pos_num]] = True
-        data.val_mask[chosen_pos] = True
+        data.val_mask[chosen_pos[train_pos_num:pos_train_val]] = True
 
     elif mechanism.upper() == "SAR":
         if data.x is None:
@@ -614,8 +614,8 @@ def make_pu_dataset(
             probs = dist_mean / dist_mean.sum()
             chosen_ids = torch.multinomial(probs, num_samples=pos_train_val, replacement=False)
             chosen_pos = pos_idx[chosen_ids]
-            data.train_mask[chosen_pos[:pos_train_val]] = True
-            data.val_mask[chosen_pos] = True
+            data.train_mask[chosen_pos[:train_pos_num]] = True
+            data.val_mask[chosen_pos[train_pos_num:pos_train_val]] = True
 
     elif mechanism.upper() == "SAR2" and hasattr(data, 'time'):
         if not hasattr(data, 'time'):
@@ -624,7 +624,7 @@ def make_pu_dataset(
         _, sorted_ids = torch.sort(pos_times, descending=False)
         chosen_pos = pos_idx[sorted_ids[:pos_train_val]]
         data.train_mask[chosen_pos[:train_pos_num]] = True
-        data.val_mask[chosen_pos] = True
+        data.val_mask[chosen_pos[train_pos_num:pos_train_val]] = True
 
     else:
         raise ValueError(f"Invalid mechanism '{mechanism}'. Use 'SCAR', 'SAR' or 'SAR2'.")    
