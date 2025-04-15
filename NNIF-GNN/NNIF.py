@@ -22,6 +22,18 @@ from imblearn.over_sampling import ADASYN
 from sklearn.utils.multiclass import type_of_target
 from xgboost import XGBClassifier
 
+import copy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.amp import autocast, GradScaler
+from torch_geometric.loader import ClusterData, ClusterLoader, NeighborLoader
+from torch_sparse import SparseTensor
+
+from sklearn.naive_bayes import GaussianNB
+
+
 
 ##############################################################################
 #                      WeightedIsoForest (Anomaly Detector)
@@ -907,6 +919,7 @@ class SpyEM(BaseEstimator, ClassifierMixin):
     self : object
         Fitted estimator.
     """
+    from sklearn.naive_bayes import GaussianNB
     self.ix_P_ = None
     self.ix_U_ = None
     self.ix_Spy_ = None
@@ -992,11 +1005,7 @@ class SpyEM(BaseEstimator, ClassifierMixin):
     #   self.em_classifier_ = NaiveBayes.from_samples(NormalDistribution, self.Xres_, self.yres_)
       
     # else:
-      
-    self.em_classifier_ = NaiveBayes.from_samples(NormalDistribution, self.Xt_, self.yt_)
             
-    self.yt_[self.ix_N_] = self.em_classifier_.predict(self.Xt_[self.ix_N_])
-    
     self.Xf_ = self.Xt_
 
     # if self.resampler:
@@ -1090,3 +1099,163 @@ class SpyEM(BaseEstimator, ClassifierMixin):
     for parameter, value in parameters.items():
       setattr(self, parameter, value)
     return self
+  def get_reliable(self, X, y):
+    """
+    Fits the SpyEM method and returns masks for reliable negatives and positives.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Input feature matrix (n_samples, n_features).
+    y : np.ndarray
+        Binary labels (1 for positive, 0 for unlabeled/negative).
+
+    Returns
+    -------
+    reliable_neg_mask : np.ndarray (bool)
+        Boolean mask for reliable negatives.
+    
+    reliable_pos_mask : np.ndarray (bool)
+        Boolean mask for reliable positives (original 1s).
+    """
+    self.fit(X, y)
+
+    n = len(y)
+    reliable_neg_mask = np.zeros(n, dtype=bool)
+    reliable_pos_mask = np.zeros(n, dtype=bool)
+
+    if self.ix_reliable_negs_ is not None:
+        reliable_neg_mask[self.ix_reliable_negs_] = True
+
+    if self.ix_P_ is not None:
+        reliable_pos_mask[self.ix_P_] = True
+
+    return reliable_neg_mask, reliable_pos_mask
+
+
+def train_two(
+    model: nn.Module,
+    data,
+    device: torch.device,
+    methodology: str="NNIF",
+    layers: int=2,
+    anomaly_detector="nearest_neighbors",
+    treatment="removal",
+    ratio=0.1,
+    model_type="sage",
+    batch_size=1024,
+    lr=0.005,
+    weight_decay=1e-6,
+    num_epochs=100
+):
+
+    data = copy.copy(data)
+    data = data.to(device)
+
+    with torch.no_grad():
+        features_np = data.x.cpu().numpy()
+        y_np = data.train_mask.cpu().numpy().astype(int)
+        
+    if methodology=="NNIF":
+        nnif_detector = ReliableValues(
+            method=treatment,
+            treatment_ratio=ratio,
+            anomaly_detector=WeightedIsoForest(n_estimators=100, type_weight=anomaly_detector),
+            random_state=42,
+            high_score_anomaly=True
+        )
+        neg_mask, pos_mask = nnif_detector.get_reliable(features_np, y_np)
+    elif methodology=="SPY":
+        spyem_detector = SpyEM(
+            spy_ratio=ratio,
+            threshold=0.15,
+            keep_treated=True,
+            keep_final=True,
+            resampler=None,
+            random_state=42
+        )
+        neg_mask, pos_mask = spyem_detector.get_reliable(features_np, y_np)
+    else:
+        neg_mask,pos_mask = ~data.train_mask.cpu().numpy(),data.train_mask.cpu().numpy()
+
+    reliable_pos_indices = torch.where(torch.tensor(pos_mask))[0]
+    reliable_neg_indices = torch.where(torch.tensor(neg_mask))[0]
+
+    reliable_nodes = torch.cat([reliable_pos_indices, reliable_neg_indices]).unique()
+
+    data.n_id = torch.arange(data.num_nodes)
+    if model_type == "SAGEConv":
+        loader = NeighborLoader(
+            data,
+            input_nodes=reliable_nodes,
+            num_neighbors=[25, 10],
+            batch_size=batch_size,
+            shuffle=True
+        )
+    else:
+        loader = NeighborLoader(
+            data,
+            input_nodes=reliable_nodes,
+            num_neighbors=[-1]*layers,
+            batch_size=batch_size,
+            shuffle=True
+        )
+    
+    model = model.to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    criterion = nn.CrossEntropyLoss()
+    scaler = GradScaler()
+
+    losses_per_epoch = []
+
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss = 0.0
+
+        for batch_data in loader:
+            batch_data = batch_data.to(device)
+
+            sub_adj = SparseTensor.from_edge_index(
+                batch_data.edge_index,
+                sparse_sizes=(batch_data.n_id.size(0), batch_data.n_id.size(0))
+            ).coalesce().to(device)
+
+            sub_nids = batch_data.n_id.cpu()
+            labels_list = []
+            for nid in sub_nids:
+                if nid in reliable_pos_indices:
+                    labels_list.append(1)
+                elif nid in reliable_neg_indices:
+                    labels_list.append(0)
+                else:
+                    labels_list.append(-1)
+
+            labels_t = torch.tensor(labels_list, dtype=torch.long, device=device)
+            keep_mask = (labels_t != -1)
+            if not keep_mask.any():
+                continue
+
+            optimizer.zero_grad()
+            with autocast(enabled=(torch.cuda.is_available()), device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+                logits = model(batch_data.x, sub_adj)
+                valid_logits = logits[keep_mask]
+                valid_labels = labels_t[keep_mask]
+                loss = criterion(valid_logits, valid_labels)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            epoch_loss += loss.item()
+
+        losses_per_epoch.append(epoch_loss)
+        print(f"Epoch [{epoch+1}/{num_epochs}] - Loss: {epoch_loss:.4f}")
+
+    model.eval()
+    full_adj = SparseTensor.from_edge_index(data.edge_index, sparse_sizes=(data.num_nodes, data.num_nodes)).to(device)
+    with torch.no_grad():
+        logits = model(data.x, full_adj)
+        prob_1 = F.softmax(logits, dim=-1)[:, 1]
+        pred_y = logits.argmax(dim=-1)
+
+    return pred_y.cpu(), prob_1.cpu(), losses_per_epoch

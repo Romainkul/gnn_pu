@@ -4,13 +4,12 @@ import csv
 import datetime
 import random
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score
-from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve, precision_recall_curve
+from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score,average_precision_score
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
-from torch_geometric.utils import add_self_loops, coalesce
+#from torch_geometric.utils import add_self_loops, coalesce
 from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
 from torch_sparse import SparseTensor
@@ -25,6 +24,11 @@ from loss import LabelPropagationLoss, ContrastiveLoss
 from NNIF import PNN, ReliableValues, WeightedIsoForest
 from encoder import GraphEncoder
 from data_generating import load_dataset, make_pu_dataset
+
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from nnpu import train_nnpu
+from NNIF import train_two
 
 logger = logging.getLogger(__name__)
 
@@ -458,8 +462,7 @@ def generate_random_numbers(n:int=5, seed:int=42, a:int=0, b:int=1000) -> List[f
 # Experiment Loop
 ##############################################################################
 def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float, float]:
-    #methodology = params["methodology"]
-    methodology="ours"
+    methodology = params["methodology"]
     dataset_name = params["dataset_name"]
     train_pct = params["train_pct"]
     mechanism = params["mechanism"]
@@ -545,8 +548,8 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
             print(f" - ratio={ratio}, aggregation={aggregation}, treatment={treatment}, anomaly_detector={anomaly_detector}, sampling={sampling}")
             print(f" - model_type={model_type}, rate_pairs={rate_pairs}, clusters={clusters}, lr={lr}")
 
-            try:
-                model = GraphEncoder(
+            
+            model = GraphEncoder(
                             model_type=model_type,
                             in_channels=in_channels,
                             hidden_channels=hidden_channels,
@@ -555,7 +558,8 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                             dropout=dropout,
                             norm=norm,
                             aggregation=aggregation)
-                
+            in_numpy=False
+            try:    
                 if methodology=="ours":
                     train_labels, train_proba, train_losses = train_graph(
                         model=model,
@@ -574,41 +578,70 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                         sampling=sampling
                     )
                                     
-                elif methodology in ["rf", "xgboost", "logisticregression", "nnpu", "imbnnpu", "ted", "two_nnif", "two_if","two_spy"]:
-                    from base_test import train_baseline
-                    train_labels, train_losses = train_baseline(**params)
+                elif methodology == "XGBoost":
+                    model = XGBClassifier()
+                    model.fit(data.x.cpu().numpy(), data.train_mask.cpu().numpy())
+                    preds_np, proba_np = model.predict(data.x[data.val_mask].cpu().numpy()), model.predict_proba(data.x[data.val_mask].cpu().numpy())[:, 1]
+                    preds_np_test, proba_np_test = model.predict(data.x[data.test_mask].cpu().numpy()), model.predict_proba(data.x[data.test_mask].cpu().numpy())[:, 1]
+                    in_numpy=True
+                    train_losses=[]
+                elif methodology == "NNIF":
+                    model = PNN(
+                        method=treatment,
+                        treatment_ratio=ratio,
+                        anomaly_detector=WeightedIsoForest(n_estimators=100, type_weight=anomaly_detector),
+                        random_state=42,
+                        high_score_anomaly=True
+                    )
+                    model.fit(data.x.cpu().numpy(), data.train_mask.cpu().numpy())
+                    preds_np, proba_np = model.predict(data.x[data.val_mask].cpu().numpy()), model.predict_proba(data.x[data.val_mask].cpu().numpy())[:, 1]
+                    preds_np_test, proba_np_test = model.predict(data.x[data.test_mask].cpu().numpy()), model.predict_proba(data.x[data.test_mask].cpu().numpy())[:, 1]
+                    in_numpy=True
+                    train_losses=[]
 
-                # 6) Compute metrics against the ground truth
-                labels_np = data.y[data.val_mask].cpu().numpy()           # ground truth
-                preds_np = train_labels[data.val_mask.cpu()].cpu().numpy()      # predicted
+                elif methodology in  ["nnpu","imbnnpu"]:
+                    nnpu= True
+                    imbnnpu = True if methodology=="imbnnpu" else False
+                    train_labels, train_proba, train_losses = train_nnpu(model,data,device,model_type,layers,batch_size,lr,prior=data.prior,nnpu=nnpu,imbpu=imbnnpu, max_epochs=num_epochs)
+
+                elif methodology in ["two_nnif","spy", "naive"]:
+                    methodo = "NNIF" if methodology == "two_nnif" else "SPY" if methodology == "spy" else "naive"
+                    train_labels, train_proba, train_losses = train_two(model,data, device,methodology=methodo,layers=layers,ratio=ratio,model_type=model_type,num_epochs=num_epochs, batch_size=batch_size)
+                
+                labels_np = data.y[data.val_mask].cpu().numpy()
+                if not in_numpy:
+                    preds_np = train_labels[data.val_mask.cpu()].cpu().numpy()
+                    proba_np = train_proba[data.val_mask.cpu()].cpu().numpy()
+
                 accuracy = accuracy_score(labels_np, preds_np)
                 f1 = f1_score(labels_np, preds_np)
                 recall = recall_score(labels_np, preds_np)
                 precision = precision_score(labels_np, preds_np)
-
-                labels_np_test = data.y[data.test_mask].cpu().numpy()           # ground truth
-                preds_np_test = train_labels[data.test_mask.cpu()].cpu().numpy()      # predicted
+                labels_np_test = data.y[data.test_mask].cpu().numpy()    
+                if not in_numpy:
+                    preds_np_test = train_labels[data.test_mask.cpu()].cpu().numpy()
+                    proba_np_test = train_proba[data.test_mask.cpu()].cpu().numpy()
                 accuracy_test = accuracy_score(labels_np_test, preds_np_test)
                 f1_test = f1_score(labels_np_test, preds_np_test)
                 recall_test = recall_score(labels_np_test, preds_np_test)
                 precision_test = precision_score(labels_np_test, preds_np_test)
+                #ap_test=average_precision_score(labels_np_test, proba_np_test)
                 
                 print(f" - Test Metrics: Accuracy={accuracy_test:.4f}, F1={f1_test:.4f}, Recall={recall_test:.4f}, Precision={precision_test:.4f}")
                 print(f" - Validation Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
 
-                f1_scores.append(f1)  # Track F1 across seeds
+                if val:
+                    f1_scores.append(f1)  # Track F1 across seeds
+                else:
+                    f1_scores.append(f1_test)
 
-                print(f" - Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
-
-                    # Otherwise record results
-                f1_scores.append(f1)
                 writer.writerow([
                         K, layers, hidden_channels, out_channels, norm, lr, treatment, dropout,
                         ratio, exp_seed, aggregation, model_type, batch_size, rate_pairs,clusters,sampling,num_epochs,anomaly_detector,
                         accuracy, f1, recall, precision, train_losses
                         ])
 
-                if f1 < min:
+                if val and (f1 < min):
                     print(f"F1 = {f1:.2f} < {min}, skipping ...")
                     break
             except Exception as e:

@@ -568,10 +568,6 @@ def make_pu_dataset(
     data.val_mask = torch.zeros(n_nodes, dtype=torch.bool)
     data.test_mask  = torch.zeros(n_nodes, dtype=torch.bool)
 
-    # test_mask => all nodes with y in {0,1}
-    # unlabeled => y=2 => test_mask=0
-    known_mask = (data.y == 0) | (data.y == 1)
-    data.test_mask[known_mask] = True
     # Store the prior => fraction of positives among all nodes
     data.prior = (data.y == 1).sum().item() / float(n_nodes)
 
@@ -638,5 +634,6 @@ def make_pu_dataset(
 
     else:
         raise ValueError(f"Invalid mechanism '{mechanism}'. Use 'SCAR', 'SAR' or 'SAR2'.")    
-
+    known_mask = ((data.y == 0) | (data.y == 1)) & ~data.train_mask
+    data.test_mask[known_mask] = True
     return data

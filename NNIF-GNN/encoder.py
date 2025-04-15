@@ -69,6 +69,7 @@ class GraphEncoder(nn.Module):
 
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
+        self.model_type = model_type
 
         for i in range(num_layers):
             if i == 0:
@@ -146,13 +147,14 @@ class GraphEncoder(nn.Module):
             (FloatTensor) [N, out_channels].
         """
         for i, conv in enumerate(self.convs):
-            x = conv(x, edge_index)
+            if self.model_type == 'MLP':
+                x = conv(x)
+            else:
+                x = conv(x, edge_index)
             if i < self.num_layers - 1:
                 if self.norm is not None:
                     x = self.norms[i](x)
                 x = F.relu(x)
                 if self.dropout > 0:
                     x = F.dropout(x, p=self.dropout, training=self.training)
-        if self.out_channels==2:
-            x=F.softmax(x, dim=1)[:, 1]
         return x
