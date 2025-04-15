@@ -598,19 +598,21 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 print(f" - Test Metrics: Accuracy={accuracy_test:.4f}, F1={f1_test:.4f}, Recall={recall_test:.4f}, Precision={precision_test:.4f}")
                 print(f" - Validation Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
 
-                f1_scores.append(f1)  # Track F1 across seeds
-
+                if val:
+                    f1_scores.append(f1)  # Track F1 across seeds
+                else:
+                    f1_scores.append(f1_test)
                 # Save the model if needed (optional)
                 # torch.save(model.state_dict(), f"model_seed_{exp_seed}.pth")
                 # Otherwise record results
-                f1_scores.append(f1)
+                #f1_scores.append(f1)
                 writer.writerow([
                         K, layers, hidden_channels, out_channels, norm, lr, treatment, dropout,
                         ratio, exp_seed, aggregation, model_type, batch_size, rate_pairs,clusters,sampling,num_epochs,anomaly_detector,
                         accuracy, f1, recall, precision, train_losses, accuracy_test, f1_test, recall_test, precision_test
                         ])
 
-                if f1 < min:
+                if val and (f1 < min):
                     print(f"F1 = {f1:.2f} < {min}, skipping ...")
                     break
             except Exception as e:
