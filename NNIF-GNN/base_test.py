@@ -16,7 +16,7 @@ from torch_geometric.data import Data
 
 # Custom modules (assumed to exist in your environment)
 from encoder import GraphEncoder
-from nnpu import PULoss  # Not used if a two-step approach is selected
+from nnPU import PULoss  # Not used if a two-step approach is selected
 from data_generating import load_dataset, make_pu_dataset
 from NNIF import PNN, ReliableValues, WeightedIsoForest, SpyEM
 from TED import run_tedn_training
