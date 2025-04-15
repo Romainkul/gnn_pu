@@ -103,7 +103,7 @@ class ContrastiveLoss(nn.Module):
             num_cls_pairs = cls_pair_indices.numel()
             if num_cls_pairs > 0:
                 weights = E[:, cls] + eps  # Sampling weights based on posterior.
-                pair_indices = torch.multinomial(1/weights, num_samples=2 * num_cls_pairs, replacement=True)
+                pair_indices = torch.multinomial(weights, num_samples=2 * num_cls_pairs, replacement=True)
                 pair_indices = pair_indices.view(-1, 2)
                 sampled_pairs_list.append(pair_indices)
 

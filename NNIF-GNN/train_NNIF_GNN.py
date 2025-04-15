@@ -328,10 +328,10 @@ def train_graph(
 
                 # Label Propagation + Contrastive
                 lp_loss, E = lp_criterion(sub_emb, sub_adj, sub_pos, sub_neg)
-                contrast_loss = contrast_criterion(
-                        sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs
-                )
-                loss = lp_loss + contrast_loss
+                #contrast_loss = contrast_criterion(
+                #        sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs
+                #)
+                loss = lp_loss #+ contrast_loss
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -562,7 +562,9 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                             aggregation=aggregation)
             in_numpy=False
             try:    
+                
                 if methodology=="ours":
+                    print("here")
                     train_labels, train_proba, train_losses = train_graph(
                         model=model,
                         data=data,
@@ -579,14 +581,17 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                         num_epochs=num_epochs,
                         sampling=sampling
                     )
-                                    
+                    
+                              
                 elif methodology == "XGBoost":
+                    print("here 2")  
                     model = XGBClassifier()
                     model.fit(data.x.cpu().numpy(), data.train_mask.cpu().numpy())
                     preds_np, proba_np = model.predict(data.x[data.val_mask].cpu().numpy()), model.predict_proba(data.x[data.val_mask].cpu().numpy())[:, 1]
                     preds_np_test, proba_np_test = model.predict(data.x[data.test_mask].cpu().numpy()), model.predict_proba(data.x[data.test_mask].cpu().numpy())[:, 1]
                     in_numpy=True
                     train_losses=[]
+
                 elif methodology == "NNIF":
                     model = PNN(
                         method=treatment,
@@ -643,7 +648,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                         accuracy, f1, recall, precision, train_losses, accuracy_test, f1_test, recall_test, precision_test
                         ])
 
-                if val and (f1 < min):
+                if f1_scores[-1] < min:
                     print(f"F1 = {f1:.2f} < {min}, skipping ...")
                     break
             except Exception as e:
