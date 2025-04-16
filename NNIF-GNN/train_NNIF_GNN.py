@@ -328,10 +328,10 @@ def train_graph(
 
                 # Label Propagation + Contrastive
                 lp_loss, E = lp_criterion(sub_emb, sub_adj, sub_pos, sub_neg)
-                #contrast_loss = contrast_criterion(
-                #        sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs
-                #)
-                loss = lp_loss #+ contrast_loss
+                contrast_loss = contrast_criterion(
+                        sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs
+                )
+                loss = lp_loss + contrast_loss
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
