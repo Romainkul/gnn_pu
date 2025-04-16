@@ -213,9 +213,7 @@ def train_graph(
         losses_per_epoch : List[float]
             Total loss per epoch during training.
     """
-
-    # Instantiate the needed criteria & early stopping
-    lp_criterion = LabelPropagationLoss(K=K).to(device)
+    lp_criterion = LabelPropagationLoss(K=K,ratio=data.train_mask.sum().item()/data.x.size(0)).to(device)
     contrast_criterion = ContrastiveLoss().to(device)
     early_stopper = EarlyStopping_GNN(patience=20)
 
@@ -283,7 +281,7 @@ def train_graph(
                 sub_emb = model(sub_data.x, sub_adj)
 
                 # Epoch 0: identify reliable samples in each mini-batch
-                if epoch == 0:
+                if epoch==0:
                     # Step A: NNIF detection
                     norm_sub_emb = F.normalize(sub_emb, dim=1)
                     features_np = norm_sub_emb.detach().cpu().numpy()
@@ -342,10 +340,10 @@ def train_graph(
         losses_per_epoch.append(epoch_loss)
 
         # Early stopping check
-        if early_stopper(epoch_loss):
-            # logger.info(f"[Early Stopping] at epoch {epoch}")  # If you have a logger
-            print(f"[Early Stopping] at epoch {epoch}")
-            break
+        #if early_stopper(epoch_loss):
+        #    # logger.info(f"[Early Stopping] at epoch {epoch}")  # If you have a logger
+        #    print(f"[Early Stopping] at epoch {epoch}")
+        #    break
 
         if epoch % 10 == 0:
             print(f"Epoch {epoch} / {num_epochs}, Loss: {epoch_loss:.4f}")
@@ -550,7 +548,6 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
             print(f" - ratio={ratio}, aggregation={aggregation}, treatment={treatment}, anomaly_detector={anomaly_detector}, sampling={sampling}")
             print(f" - model_type={model_type}, rate_pairs={rate_pairs}, clusters={clusters}, lr={lr}")
 
-            
             model = GraphEncoder(
                             model_type=model_type,
                             in_channels=in_channels,
@@ -561,10 +558,8 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                             norm=norm,
                             aggregation=aggregation)
             in_numpy=False
-            try:    
-                
+            try:     
                 if methodology=="ours":
-                    print("here")
                     train_labels, train_proba, train_losses = train_graph(
                         model=model,
                         data=data,
@@ -624,10 +619,13 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 f1 = f1_score(labels_np, preds_np)
                 recall = recall_score(labels_np, preds_np)
                 precision = precision_score(labels_np, preds_np)
+
                 labels_np_test = data.y[data.test_mask].cpu().numpy()    
                 if not in_numpy:
                     preds_np_test = train_labels[data.test_mask.cpu()].cpu().numpy()
                     proba_np_test = train_proba[data.test_mask.cpu()].cpu().numpy()
+                    print("sum preds",preds_np_test.sum())
+                    print("sum labels",labels_np_test.sum())
                 accuracy_test = accuracy_score(labels_np_test, preds_np_test)
                 f1_test = f1_score(labels_np_test, preds_np_test)
                 recall_test = recall_score(labels_np_test, preds_np_test)
@@ -649,7 +647,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                         ])
 
                 if f1_scores[-1] < min:
-                    print(f"F1 = {f1:.2f} < {min}, skipping ...")
+                    print(f"F1 = {f1_scores[-1]:.2f} < {min}, skipping ...")
                     break
             except Exception as e:
                 print(f"Error: {e}")

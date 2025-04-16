@@ -14,11 +14,12 @@ class LabelPropagationLoss(nn.Module):
     with a learnable alpha in (0, 1).
     Returns both the scalar loss and the final label distribution E.
     """
-    def __init__(self, K=5,alpha=0.5):
+    def __init__(self, K=5,ratio=0.1,alpha=0.5):
         super().__init__()
         # raw_alpha is a learnable parameter that we map to (0,1) via sigmoid
         self.raw_alpha = nn.Parameter(torch.tensor(alpha))
         self.K = K
+        self.ratio=ratio
 
     def forward(self, embeddings, sub_A: SparseTensor, sub_pos, sub_neg):
         """
@@ -59,7 +60,10 @@ class LabelPropagationLoss(nn.Module):
         pos_loss = -torch.log(pos_probs).mean() if len(sub_pos) > 0 else 0.0
         neg_loss = -torch.log(neg_probs).mean() if len(sub_neg) > 0 else 0.0
 
-        lp_loss = pos_loss + neg_loss
+        w_pos = 0.5 / self.ratio
+        w_neg = 0.5 / (1.0 - self.ratio)
+
+        lp_loss = w_pos*pos_loss + w_neg*neg_loss
         return lp_loss, E
     
 ##############################################################################
@@ -92,6 +96,7 @@ class ContrastiveLoss(nn.Module):
 
         # --- Sampling Pairs Based on Posterior ---
         global_class_probs = E.mean(dim=0)  # Shape: [2]
+
         class_distribution = torch.distributions.Categorical(global_class_probs)
         sampled_classes = class_distribution.sample((num_pairs,))  # Shape: [num_pairs]
 
@@ -103,7 +108,7 @@ class ContrastiveLoss(nn.Module):
             num_cls_pairs = cls_pair_indices.numel()
             if num_cls_pairs > 0:
                 weights = E[:, cls] + eps  # Sampling weights based on posterior.
-                pair_indices = torch.multinomial(weights, num_samples=2 * num_cls_pairs, replacement=True)
+                pair_indices = torch.multinomial(1/weights, num_samples=2 * num_cls_pairs, replacement=True)
                 pair_indices = pair_indices.view(-1, 2)
                 sampled_pairs_list.append(pair_indices)
 
