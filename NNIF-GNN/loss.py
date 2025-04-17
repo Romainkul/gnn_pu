@@ -14,12 +14,13 @@ class LabelPropagationLoss(nn.Module):
     with a learnable alpha in (0, 1).
     Returns both the scalar loss and the final label distribution E.
     """
-    def __init__(self, K=5,ratio=0.1,alpha=0.5):
+    def __init__(self, K=5,ratio=0.1,alpha=0.5,ablation=False):
         super().__init__()
         # raw_alpha is a learnable parameter that we map to (0,1) via sigmoid
         self.raw_alpha = nn.Parameter(torch.tensor(alpha))
         self.K = K
         self.ratio=ratio
+        self.ablation=ablation
 
     def forward(self, embeddings, sub_A: SparseTensor, sub_pos, sub_neg):
         """
@@ -62,7 +63,9 @@ class LabelPropagationLoss(nn.Module):
 
         w_pos = 0.5 / self.ratio
         w_neg = 0.5 / (1.0 - self.ratio)
-
+        if self.ablation:
+            w_pos = 1.0
+            w_neg = 1.0
         lp_loss = w_pos*pos_loss + w_neg*neg_loss
         return lp_loss, E
     

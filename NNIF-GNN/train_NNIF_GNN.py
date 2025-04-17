@@ -158,7 +158,10 @@ def train_graph(
     cluster: int = 1500,
     anomaly_detector: str = "nearest_neighbors",
     layers: int = 3,
-    sampling: str = "cluster"
+    sampling: str = "cluster",
+    abl_lpl: bool = False,
+    abl_contrast: bool = False,
+    abl_adasyn: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[float]]:
     """
     Trains a GNN model on the given graph data using Label Propagation + Contrastive Loss.
@@ -202,6 +205,12 @@ def train_graph(
         Anomaly detector (e.g., 'nearest_neighbors' or 'unweighted').
     sampling : str
         Sampling method for NeighborLoader ('cluster', 'neighbor', or 'nearest_neighbor').
+    abl_lpl : bool
+        If True, disables the imbalanced weighting of the Label Propagation Loss.
+    abl_contrast : bool
+        If True, disables the Contrastive Loss.
+    abl_adasyn : bool
+        If True, disables the ADASYN sampling.
 
     Returns
     -------
@@ -215,7 +224,7 @@ def train_graph(
     """
     #data.train_mask.sum().item()/data.x.size(0)
     estim_prior = data.train_mask.sum().item()/data.x.size(0) + ratio*(data.x.size(0)-data.train_mask.sum().item())/data.x.size(0)
-    lp_criterion = LabelPropagationLoss(K=K,ratio=estim_prior).to(device)
+    lp_criterion = LabelPropagationLoss(K=K,ratio=estim_prior,ablation=abl_lpl).to(device)
     contrast_criterion = ContrastiveLoss().to(device)
     early_stopper = EarlyStopping_GNN(patience=20)
 
@@ -330,11 +339,13 @@ def train_graph(
 
                 # Label Propagation + Contrastive
                 lp_loss, E = lp_criterion(sub_emb, sub_adj, sub_pos, sub_neg)
-                contrast_loss = contrast_criterion(
-                        sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs
-                )
-                loss = lp_loss + contrast_loss
-
+                if not abl_contrast:
+                    contrast_loss = contrast_criterion(
+                            sub_emb, E, num_pairs=sub_emb.size(0) * rate_pairs
+                    )
+                    loss = lp_loss + contrast_loss
+                else:
+                    loss = lp_loss
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -383,7 +394,8 @@ def train_graph(
         treatment_ratio=ratio,
         anomaly_detector=WeightedIsoForest(n_estimators=100, type_weight=anomaly_detector),
         random_state=42,
-        high_score_anomaly=True
+        high_score_anomaly=True,
+        resampler=None
     )
 
     norm_emb = F.normalize(embeddings, dim=1)
@@ -490,10 +502,17 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
     num_epochs = params["num_epochs"]
     sampling = params["sampling"]
     val=params["val"]
-    if params["mult"]:
+    if "mult" in params.keys():
         mult=params["mult"]
         ratio=(mult*data.prior-train_pct*data.y.sum().item())/(1-train_pct*data.y.sum().item())
         prior=mult*data.prior
+    abl_lpl, abl_contrast, abl_adasyn = False, False, False
+    if "abl_lpl" in params.keys():
+        abl_lpl=params["abl_lpl"]
+    if "abl_contrast" in params.keys():
+        abl_lpl=params["abl_contrast"]
+    if "abl_adasyn" in params.keys():
+        abl_lpl=params["abl_adasyn"]
 
     f1_scores = []
 
@@ -582,7 +601,10 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                         cluster=clusters,
                         layers=layers,
                         num_epochs=num_epochs,
-                        sampling=sampling
+                        sampling=sampling,
+                        abl_lpl=abl_lpl,
+                        abl_contrast=abl_contrast,
+                        abl_adasyn=abl_adasyn,
                     )
                     
                               
