@@ -213,7 +213,9 @@ def train_graph(
         losses_per_epoch : List[float]
             Total loss per epoch during training.
     """
-    lp_criterion = LabelPropagationLoss(K=K,ratio=data.train_mask.sum().item()/data.x.size(0)).to(device)
+    #data.train_mask.sum().item()/data.x.size(0)
+    estim_prior = data.train_mask.sum().item()/data.x.size(0) + ratio*(data.x.size(0)-data.train_mask.sum().item())/data.x.size(0)
+    lp_criterion = LabelPropagationLoss(K=K,ratio=estim_prior).to(device)
     contrast_criterion = ContrastiveLoss().to(device)
     early_stopper = EarlyStopping_GNN(patience=20)
 
