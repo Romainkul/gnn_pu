@@ -229,6 +229,8 @@ def train_graph(
             batch_size=15
         elif batch_size==1024:
             batch_size=20
+        elif batch_size==2048:
+            batch_size=40
         #print(f"Batch size: {batch_size}")
         cluster_data = ClusterData(data, num_parts=cluster)
         #print(f"Number of clusters: {len(cluster_data)}")
@@ -488,6 +490,10 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
     num_epochs = params["num_epochs"]
     sampling = params["sampling"]
     val=params["val"]
+    if params["mult"]:
+        mult=params["mult"]
+        ratio=(mult*data.prior-train_pct*data.y.sum().item())/(1-train_pct*data.y.sum().item())
+        prior=mult*data.prior
 
     f1_scores = []
 
@@ -606,7 +612,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 elif methodology in  ["nnpu","imbnnpu"]:
                     nnpu= True
                     imbnnpu = True if methodology=="imbnnpu" else False
-                    train_labels, train_proba, train_losses = train_nnpu(model,data,device,model_type,layers,batch_size,lr,prior=data.prior,nnpu=nnpu,imbpu=imbnnpu, max_epochs=num_epochs)
+                    train_labels, train_proba, train_losses = train_nnpu(model,data,device,model_type,layers,batch_size,lr,prior=prior,nnpu=nnpu,imbpu=imbnnpu, max_epochs=num_epochs)
 
                 elif methodology in ["two_nnif","spy", "naive"]:
                     methodo = "NNIF" if methodology == "two_nnif" else "SPY" if methodology == "spy" else "naive"
