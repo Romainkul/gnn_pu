@@ -2,19 +2,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from train_NNIF_GNN import run_nnif_gnn_experiment
 
-def experiment_varying_ratio_of_positives(ratio_list, fixed_params):
-    """
-    Sweeps over different ratios of positive samples,
-    calls 'run_nnif_gnn_experiment', and plots the final metric vs. ratio.
-    
-    ratio_list   : list of floats (e.g. [0.1, 0.2, 0.3, 0.5])
-    fixed_params : dict of other params that remain constant
-    """
+def experiment_varying_ratio_of_positives(fixed_params):
     results = []
+    ratio_list=[0.5,0.4,0.3,0.2]
+    
     est_prior=fixed_params['ratio']/((1 - 0.5) + (fixed_params['ratio'] * 0.5))
+    
     for train_pct in ratio_list:
         ratio=(est_prior-train_pct*est_prior)/(1-train_pct*est_prior)    
-        # Merge ratio with the fixed parameters
         exp_params = {**fixed_params, 'train_pct': train_pct, 'ratio': ratio}
         
         # Call your training function
@@ -33,14 +28,6 @@ def experiment_varying_ratio_of_positives(ratio_list, fixed_params):
 
 
 def experiment_varying_k(k_values, pollution_ratios, fixed_params):
-    """
-    Sweeps over k_values and pollution_ratios to produce a 3D surface or heatmap
-    that might show how 'K' and 'pollution ratio' jointly affect performance.
-    
-    k_values        : list of ints/floats
-    pollution_ratios: list of floats
-    fixed_params    : dict
-    """
     metric_matrix = np.zeros((len(k_values), len(pollution_ratios)), dtype=float)
 
     for i, k_val in enumerate(k_values):
