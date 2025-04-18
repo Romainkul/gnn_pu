@@ -502,10 +502,6 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
     num_epochs = params["num_epochs"]
     sampling = params["sampling"]
     val=params["val"]
-    if "mult" in params.keys():
-        mult=params["mult"]
-        ratio=(mult*data.prior-train_pct*data.y.sum().item())/(1-train_pct*data.y.sum().item())
-        prior=mult*data.prior
     abl_lpl, abl_contrast, abl_adasyn = False, False, False
     if "abl_lpl" in params.keys():
         abl_lpl=params["abl_lpl"]
@@ -560,6 +556,11 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 train_pct=train_pct,
                 val=val
             )
+            prior=data.prior
+            if "mult" in params.keys():
+                mult=params["mult"]
+                ratio=(mult*data.prior-train_pct*data.y.sum().item())/(1-train_pct*data.y.sum().item())
+                prior=mult*data.prior
             #print(data)
             # Prepare model input size
             in_channels = data.num_node_features
