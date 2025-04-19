@@ -9,7 +9,7 @@ from torch_geometric.typing import OptTensor
 from typing import Optional, Tuple, Union
 from torch import Tensor
 
-class SimilarityCache:
+"""class SimilarityCache:
     def __init__(self, colptr, row_data, node_features, device=None):
         self.colptr = colptr
         self.row_data = row_data
@@ -92,9 +92,9 @@ def cached_weighted_sample_fn(colptr, row_data, index, num_neighbors,
     cols = torch.tensor(cols, dtype=torch.long, device=device)
     edges = torch.arange(len(rows), device=device)
 
-    return samples, rows, cols, edges
+    return samples, rows, cols, edges"""
 
-"""def custom_weighted_sample_fn(colptr, row_data, index, num_neighbors,
+def custom_weighted_sample_fn(colptr, row_data, index, num_neighbors,
                               node_features, replace=False, directed=True):
 
     device = node_features.device
@@ -112,19 +112,23 @@ def cached_weighted_sample_fn(colptr, row_data, index, num_neighbors,
         batch_rows, batch_cols = [], []
 
         for local_idx, w in enumerate(current_nodes):
-            col_start, col_end = colptr[w].item(), colptr[w+1].item()
-            neighbors = row_data[col_start:col_end]
+            w_tensor = torch.tensor(w, device=device)
+            col_start = colptr[w_tensor].item()
+            col_end = colptr[w_tensor + 1].item()
+            
+            neighbors = row_data[col_start:col_end].to(device)
 
             if neighbors.numel() == 0:
                 continue
 
+            # Features are already on the same device
             neighbor_feats = node_features[neighbors]
             w_feat = node_features[w].unsqueeze(0).expand_as(neighbor_feats)
 
             sims = F.cosine_similarity(w_feat, neighbor_feats, dim=1)
             sim_weights = (sims + 1.0) / 2.0
             sim_sum = sim_weights.sum()
-            sim_weights = sim_weights / sim_sum if sim_sum > 0 else torch.ones_like(sim_weights)/len(sim_weights)
+            sim_weights = sim_weights / sim_sum if sim_sum > 0 else torch.ones_like(sim_weights) / len(sim_weights)
 
             if num_samples < 0 or num_samples >= neighbors.size(0):
                 selected_neighbors = neighbors
@@ -152,7 +156,8 @@ def cached_weighted_sample_fn(colptr, row_data, index, num_neighbors,
     edges = torch.arange(len(rows), device=device)
 
     return samples, rows, cols, edges
-"""
+
+
 def to_weighted_csc(
     data: Union[Data],
     device: Optional[torch.device] = None,
@@ -198,30 +203,22 @@ class NeighborSampler:
         if data.x is None:
             raise ValueError("Node features (data.x) are required for similarity-based weighting.")
         self.node_features = data.x.contiguous()
-        self.sim_cache = SimilarityCache(self.colptr, self.row, self.node_features, device=device)
+        #self.sim_cache = SimilarityCache(self.colptr, self.row, self.node_features, device=device)
 
     def __call__(self, index: torch.Tensor):
         if not isinstance(index, torch.LongTensor):
             index = torch.LongTensor(index)
         if self.weight_func == 'similarity':
-            sample_fn=cached_weighted_sample_fn
+            sample_fn = custom_weighted_sample_fn
             node, row, col, edge = sample_fn(
                 self.colptr,
                 self.row,
                 index,
-                self.num_neighbors, 
+                self.num_neighbors,
                 self.node_features,
-                self.sim_cache)
-            #sample_fn = custom_weighted_sample_fn
-            #node, row, col, edge = sample_fn(
-            #    self.colptr,
-            #    self.row,
-            #    index,
-            #    self.num_neighbors,
-            #    self.node_features,
-            #    self.replace,
-            #    self.directed,
-            #)
+                self.replace,
+                self.directed,
+            )
         else:
             raise ValueError('Invalid weight_func specified. Use "similarity".')
 
