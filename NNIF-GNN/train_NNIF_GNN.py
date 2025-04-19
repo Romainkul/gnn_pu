@@ -559,7 +559,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
             prior=data.prior
             if "mult" in params.keys():
                 mult=params["mult"]
-                ratio=(mult*data.prior-train_pct*data.y.sum().item())/(1-train_pct*data.y.sum().item())
+                ratio=(data.prior*mult-train_pct*data.y.sum().item()/data.x.size(0))/(1-train_pct*data.y.sum().item()/data.x.size(0))
                 prior=mult*data.prior
             #print(data)
             # Prepare model input size
