@@ -164,12 +164,13 @@ def train_nnpu(
     else:
         pu_criterion = BCEWithLogitsLoss().to(device)
 
-    if model_type == "SAGEConv":
+    if model_type:
         train_loader = NeighborLoader(
             data,
             num_neighbors=[25, 10],
             batch_size=batch_size,
-            shuffle=True
+            shuffle=True,
+            input_nodes=data.train_mask|data.test_mask|data.val_mask
         )
     else:
         train_loader = None

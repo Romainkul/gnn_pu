@@ -395,7 +395,7 @@ def train_graph(
         anomaly_detector=WeightedIsoForest(n_estimators=100, type_weight=anomaly_detector),
         random_state=42,
         high_score_anomaly=True,
-        resampler=None
+        resampler=None if abl_adasyn else "adasyn",
     )
 
     norm_emb = F.normalize(embeddings, dim=1)
@@ -511,6 +511,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
         abl_lpl=params["abl_adasyn"]
 
     f1_scores = []
+    ap_scores = []
 
     # Prepare output folder and CSV
     output_folder = f"{dataset_name}_experimentations"
@@ -559,7 +560,7 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
             prior=data.prior
             if "mult" in params.keys():
                 mult=params["mult"]
-                ratio=(data.prior*mult-train_pct*data.y.sum().item()/data.x.size(0))/(1-train_pct*data.y.sum().item()/data.x.size(0))
+                ratio=(data.prior*mult-train_pct*data.y[data.test_mask|data.train_mask].sum().item()/data.x.size(0))/(1-train_pct*data.y[data.test_mask|data.train_mask].sum().item()/data.x.size(0))
                 prior=mult*data.prior
             #print(data)
             # Prepare model input size
@@ -661,15 +662,17 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
                 f1_test = f1_score(labels_np_test, preds_np_test)
                 recall_test = recall_score(labels_np_test, preds_np_test)
                 precision_test = precision_score(labels_np_test, preds_np_test)
-                #ap_test=average_precision_score(labels_np_test, proba_np_test)
+                ap_test=average_precision_score(labels_np_test, proba_np_test)
                 
-                print(f" - Test Metrics: Accuracy={accuracy_test:.4f}, F1={f1_test:.4f}, Recall={recall_test:.4f}, Precision={precision_test:.4f}")
+                print(f" - Test Metrics: Accuracy={accuracy_test:.4f}, F1={f1_test:.4f}, Recall={recall_test:.4f}, Precision={precision_test:.4f}, AP={ap_test:.4f}")
                 print(f" - Validation Metrics: Accuracy={accuracy:.4f}, F1={f1:.4f}, Recall={recall:.4f}, Precision={precision:.4f}")
 
                 if val:
                     f1_scores.append(f1)  # Track F1 across seeds
+                    ap_scores.append(ap_test)
                 else:
                     f1_scores.append(f1_test)
+                    ap_scores.append(ap_test)  # Track AP across seeds
 
                 writer.writerow([
                         K, layers, hidden_channels, out_channels, norm, lr, treatment, dropout,
@@ -687,11 +690,13 @@ def run_nnif_gnn_experiment(params: Dict[str, Any], seed:int=42) -> Tuple[float,
     # Summarize results
     if len(f1_scores) > 0:
         avg_f1 = float(np.mean(f1_scores))
+        avg_ap = float(np.mean(ap_scores))
+        std_ap = float(np.std(ap_scores))
         std_f1 = float(np.std(f1_scores))
     else:
-        avg_f1, std_f1 = 0.0, 0.0
+        avg_f1, std_f1, avg_ap,std_ap = 0.0, 0.0, 0.0, 0.0
 
     print(f"Done. Results written to {output_csv}.")
     print(f"Average F1 over valid seeds: {avg_f1:.4f} ± {std_f1:.4f}")
 
-    return avg_f1, std_f1
+    return avg_f1, std_f1, avg_ap, std_ap

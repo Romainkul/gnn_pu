@@ -1151,10 +1151,10 @@ def train_two(
 
     data = copy.copy(data)
     data = data.to(device)
-
+    mask=data.train_mask.cpu()|data.test_mask.cpu()|data.val_mask.cpu()
     with torch.no_grad():
-        features_np = data.x.cpu().numpy()
-        y_np = data.train_mask.cpu().numpy().astype(int)
+        features_np = data.x[mask].cpu().numpy()
+        y_np = data.train_mask[mask].cpu().numpy().astype(int)
         
     if methodology=="NNIF":
         nnif_detector = ReliableValues(
@@ -1195,10 +1195,10 @@ def train_two(
     else:
         loader = NeighborLoader(
             data,
-            input_nodes=reliable_nodes,
-            num_neighbors=[-1]*layers,
+            input_nodes=mask,
+            num_neighbors=[25,10],
             batch_size=batch_size,
-            shuffle=True
+            shuffle=True,
         )
     
     model = model.to(device)

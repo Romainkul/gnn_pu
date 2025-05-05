@@ -1,0 +1,5 @@
+dataset,mechanism,methodology,model_type,K,avg_f1,std_f1,avg_ap,std_ap
+elliptic-bitcoin,SAR2,ours,GATConv,7,0.2714409471556454,0.0,0.22966141901729037,0.0
+elliptic-bitcoin,SAR2,ours,GATConv,7,0.08104886769964244,0.0,0.07263096973579461,0.0
+elliptic-bitcoin,SAR2,ours,GATConv,7,0.20819805194805194,0.0,0.11595373646386113,0.0
+elliptic-bitcoin,SAR2,ours,GATConv,7,0.15345666991236612,0.0,0.09136507120810367,0.0

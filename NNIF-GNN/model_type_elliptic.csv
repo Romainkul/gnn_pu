@@ -1,0 +1,7 @@
+dataset,mechanism,methodology,model_type,aggregation,avg_f1,std_f1,avg_ap,std_ap
+elliptic-bitcoin,SAR2,ours,MLP,mean,0.053148889697852204,0.0,0.06571454776397252,0.0
+elliptic-bitcoin,SAR2,ours,GATConv,mean,0.290846877673225,0.0,0.25686313540186406,0.0
+elliptic-bitcoin,SAR2,ours,GCNConv,mean,0.24680851063829787,0.0,0.2032190039029969,0.0
+elliptic-bitcoin,SAR2,ours,SAGEConv,mean,0.257445400397088,0.0,0.2766811707783835,0.0
+elliptic-bitcoin,SAR2,ours,SAGEConv,max,0.29774436090225564,0.0,0.25302647979335097,0.0
+elliptic-bitcoin,SAR2,ours,SAGEConv,sum,0.2082662372517445,0.0,0.16907662419659192,0.0
