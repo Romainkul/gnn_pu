@@ -8,12 +8,14 @@ Positive–unlabelled (PU) learning is critical in domains where reliable negati
 
 ### Stage 1 — Representation & Reliable Negatives
 
+* **Nearest‑Neighbour Isolation Forest** removes anomalous unlabelled nodes, producing a reliable‑negative set.
 * Mini‑batch sampling on large graphs.
 * Joint **label‑propagation + soft‑margin contrastive** loss yields balanced, discriminative embeddings.
-* **Nearest‑Neighbour Isolation Forest** removes anomalous unlabelled nodes, producing a reliable‑negative set.
+
 
 ### Stage 2 — Rebalancing & Classification
 
+* **Nearest‑Neighbour Isolation Forest** removes anomalous unlabelled nodes, producing a reliable‑negative set.
 * **ADASYN** oversamples minority (positive) nodes in the embedding space.
 * An **XGBoost** classifier is trained on the balanced embeddings for final prediction.
 
