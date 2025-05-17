@@ -1,3 +1,5 @@
+# Code from: https://github.com/CarlosOrtegaV/PU_AnomalyDetection/
+# With some modifications to make it compatible with scikit-learn >= 1.2 and extensions
 import logging
 import math
 import numbers
@@ -489,6 +491,7 @@ class PNN(BaseEstimator, ClassifierMixin):
         self.treatment_ratio = treatment_ratio
         self.anomaly_detector = anomaly_detector
         self.high_score_anomaly = high_score_anomaly
+        self.anomaly_threshold_ = None
         self.base_classifier = base_classifier
         self.resampler = resampler
         self.max_samples = max_samples
@@ -610,6 +613,7 @@ class PNN(BaseEstimator, ClassifierMixin):
                     anom_idx = np.where(scores < thresh)[0]
 
                 self.modified_instances_ = ix_neg[anom_idx]
+                self.anomaly_threshold_ = thresh
 
         # ---- STEP 2: Treatment (remove or relabel) ----
         if self.method == 'removal' and self.modified_instances_ is not None:
@@ -648,7 +652,6 @@ class PNN(BaseEstimator, ClassifierMixin):
             self.Xt_, self.yt_ = None, None
         if not self.keep_final:
             self.Xf_, self.yf_ = None, None
-
         return self
 
     def predict(self, X):
@@ -708,6 +711,79 @@ class PNN(BaseEstimator, ClassifierMixin):
         for k, v in params.items():
             setattr(self, k, v)
         return self
+    
+    def plot_anomaly_score(self, y_true,features_np,pu, dataset, mechanism):
+        """
+        Plot the distribution of anomaly scores for:
+        • Unlabeled true negatives
+        • Unlabeled true positives
+        • Known positives
+
+        Also draws a vertical line at the anomaly_threshold_.
+
+        Parameters
+        ----------
+        y_true : array-like, shape (n_samples,)
+            The ground-truth labels for every sample (0 or 1).
+            Must be the same length as self.Xt_.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        if self.anomaly_threshold_ is None:
+            raise RuntimeError("You must call get_reliable(...) before plotting.")
+        y_true = np.asarray(y_true)
+        # 1) score everything
+        all_scores = self.anomaly_detector.score_samples(features_np)
+
+        # 2) build masks
+        idx = np.arange(len(y_true))
+        mask_known_pos = (pu == 1)                    # originals you fed in as positives
+        mask_unlabeled_true_pos   = (y_true == 1) & (pu == 0)
+        mask_unlabeled_true_neg   = (y_true == 0) & (pu == 0)
+
+        # 3) plot
+        plt.figure(figsize=(8, 5))
+        plt.hist(
+            all_scores[mask_unlabeled_true_neg],
+            bins=40, alpha=0.5,
+            label='Unlabeled (True Negative)',
+            color='blue'
+        )
+        plt.hist(
+            all_scores[mask_unlabeled_true_pos],
+            bins=40, alpha=0.5,
+            label='Unlabeled (True Positive)',
+            color='orange'
+        )
+        plt.hist(
+            all_scores[mask_known_pos],
+            bins=40, alpha=0.5,
+            label='Known Positive',
+            color='red'
+        )
+
+        # 4) threshold line
+        plt.axvline(
+            self.anomaly_threshold_,
+            linestyle='--',
+            linewidth=2,
+            label=f'Threshold = {self.anomaly_threshold_:.3f}'
+        )
+
+        plt.xlabel('Anomaly Score')
+        plt.ylabel('Count')
+        if mechanism =='SAR':
+            mechanism = 'PG'
+        if dataset=="wiki-cs":
+            dataset = 'Wiki-CS'
+        else:
+            dataset = dataset.capitalize()
+        plt.title(f'Anomaly Score Distributions on Learned Embeddings {dataset} - {mechanism}')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f'anomaly_score_distribution_{dataset}_{mechanism}.png', dpi=300, bbox_inches='tight')
+        plt.show()
+
 
 
 ##############################################################################
@@ -754,6 +830,7 @@ class ReliableValues:
         self.anomaly_detector = anomaly_detector
         self.high_score_anomaly = high_score_anomaly
         self.random_state = random_state
+        self.anomaly_threshold_ = None
 
         # Will be set during get_reliable(...)
         self.Xt_ = None
@@ -835,6 +912,7 @@ class ReliableValues:
             thresh = np.quantile(scores, frac)
             anom_idx = np.where(scores < thresh)[0]
 
+        self.anomaly_threshold_ = thresh
         self.modified_instances_ = ix_neg[anom_idx]
 
         # Initialize masks with original labels
@@ -855,6 +933,81 @@ class ReliableValues:
             )
 
         return reliable_neg_mask, reliable_pos_mask
+
+    def plot_anomaly_score(self, y_true, dataset, mechanism):
+        """
+        Plot the distribution of anomaly scores for:
+        • Unlabeled true negatives
+        • Unlabeled true positives
+        • Known positives
+
+        Also draws a vertical line at the anomaly_threshold_.
+
+        Parameters
+        ----------
+        y_true : array-like, shape (n_samples,)
+            The ground-truth labels for every sample (0 or 1).
+            Must be the same length as self.Xt_.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        if self.anomaly_threshold_ is None:
+            raise RuntimeError("You must call get_reliable(...) before plotting.")
+        y_true = np.asarray(y_true)
+        if y_true.shape[0] != self.Xt_.shape[0]:
+            raise ValueError("y_true must be same length as training data.")
+
+        # 1) score everything
+        all_scores = self.anomaly_detector.score_samples(self.Xt_)
+
+        # 2) build masks
+        idx = np.arange(len(y_true))
+        mask_known_pos = (self.yt_ == 1)                    # originals you fed in as positives
+        mask_unlabeled_true_pos   = (y_true == 1) & (self.yt_ == 0)
+        mask_unlabeled_true_neg   = (y_true == 0) & (self.yt_ == 0)
+
+        # 3) plot
+        plt.figure(figsize=(8, 5))
+        plt.hist(
+            all_scores[mask_unlabeled_true_neg],
+            bins=40, alpha=0.5,
+            label='Unlabeled (True Negative)',
+            color='blue'
+        )
+        plt.hist(
+            all_scores[mask_unlabeled_true_pos],
+            bins=40, alpha=0.5,
+            label='Unlabeled (True Positive)',
+            color='orange'
+        )
+        plt.hist(
+            all_scores[mask_known_pos],
+            bins=40, alpha=0.5,
+            label='Known Positive',
+            color='red'
+        )
+
+        # 4) threshold line
+        plt.axvline(
+            self.anomaly_threshold_,
+            linestyle='--',
+            linewidth=2,
+            label=f'Threshold = {self.anomaly_threshold_:.3f}'
+        )
+
+        plt.xlabel('Anomaly Score')
+        plt.ylabel('Count')
+        if mechanism =='SAR':
+            mechanism = 'PG'
+        if dataset=="wiki-cs":
+            dataset = 'Wiki-CS'
+        else:
+            dataset = dataset.capitalize()
+        plt.title(f'Anomaly Score Distributions (Initial Epoch) {dataset} - {mechanism}')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f'anomaly_score_distribution_initial_{dataset}_{mechanism}.png', dpi=300, bbox_inches='tight')
+        plt.show()
 
 class SpyEM(BaseEstimator, ClassifierMixin):
   """ Spy Expectation Maximization
@@ -1167,7 +1320,7 @@ def train_two(
         neg_mask, pos_mask = nnif_detector.get_reliable(features_np, y_np)
     elif methodology=="SPY":
         spyem_detector = SpyEM(
-            spy_ratio=ratio,
+            spy_ratio=0.1,
             threshold=0.15,
             keep_treated=True,
             keep_final=True,
@@ -1184,7 +1337,7 @@ def train_two(
     reliable_nodes = torch.cat([reliable_pos_indices, reliable_neg_indices]).unique()
 
     data.n_id = torch.arange(data.num_nodes)
-    if model_type == "SAGEConv":
+    if hasattr(data, "train_mask"):
         loader = NeighborLoader(
             data,
             input_nodes=reliable_nodes,
@@ -1258,4 +1411,5 @@ def train_two(
         prob_1 = F.softmax(logits, dim=-1)[:, 1]
         pred_y = logits.argmax(dim=-1)
 
-    return pred_y.cpu(), prob_1.cpu(), losses_per_epoch
+    combined_mask = (data.train_mask | data.test_mask | data.val_mask)
+    return pred_y[combined_mask].cpu(), prob_1[combined_mask].cpu(), losses_per_epoch

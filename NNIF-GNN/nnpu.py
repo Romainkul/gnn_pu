@@ -242,4 +242,5 @@ def train_nnpu(
 
         # Convert from [0,1] to {0,1} threshold 0.5
         pred_y = (proba > 0.5).long()
-    return pred_y.cpu(), proba.cpu(), losses_per_epoch
+    combined_mask = (data.train_mask | data.test_mask | data.val_mask)
+    return pred_y[combined_mask].cpu(), proba[combined_mask].cpu(), losses_per_epoch

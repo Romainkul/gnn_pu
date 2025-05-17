@@ -1,6 +1,0 @@
-K,layers,hidden_channels,out_channels,norm,lr,treatment,dropout,ratio,seed,aggregation,model_type,batch_size,rate_pairs,clusters,sampling,num_epochs,anomaly_detector,accuracy,f1,recall,precision,losses,test_accuracy,test_f1,test_recall,test_precision
-4,2,16,1,,0.005,removal,0,0.142347,654,mean,MLP,2048,10,50,sage,50,nearest_neighbors,nan,0.0,0.0,0.0,[],0.8824319785018475,0.011299435028248588,0.005698005698005698,0.6666666666666666
-4,2,16,1,,0.005,removal,0,0.142347,114,mean,MLP,2048,10,50,sage,50,nearest_neighbors,nan,0.0,0.0,0.0,[],0.8827678871346993,0.0113314447592068,0.005698005698005698,1.0
-4,2,16,1,,0.005,removal,0,0.142347,25,mean,MLP,2048,10,50,sage,50,nearest_neighbors,nan,0.0,0.0,0.0,[],0.8820960698689956,0.0,0.0,0.0
-4,2,16,1,,0.005,removal,0,0.142347,759,mean,MLP,2048,10,50,sage,50,nearest_neighbors,nan,0.0,0.0,0.0,[],0.8827678871346993,0.0113314447592068,0.005698005698005698,1.0
-4,2,16,1,,0.005,removal,0,0.142347,281,mean,MLP,2048,10,50,sage,50,nearest_neighbors,nan,0.0,0.0,0.0,[],0.8820960698689956,0.0,0.0,0.0

@@ -1,3 +1,5 @@
+# This code is from SHINE: https://github.com/rafaelvanbelle/SHINE/
+# This code is a custom neighbor sampling function for PyTorch Geometric.
 import random
 import torch
 import torch.nn.functional as F
@@ -8,91 +10,6 @@ from torch_geometric.utils import to_torch_csc_tensor
 from torch_geometric.typing import OptTensor
 from typing import Optional, Tuple, Union
 from torch import Tensor
-
-"""class SimilarityCache:
-    def __init__(self, colptr, row_data, node_features, device=None):
-        self.colptr = colptr
-        self.row_data = row_data
-        self.device = device or node_features.device
-        self.node_features = node_features
-        self.cache = {}
-
-    def get_sim_weights(self, node_id):
-        if node_id in self.cache:
-            return self.cache[node_id]
-
-        col_start, col_end = self.colptr[node_id].item(), self.colptr[node_id+1].item()
-        neighbors = self.row_data[col_start:col_end]
-
-        if neighbors.numel() == 0:
-            return neighbors, torch.tensor([], device=self.device)
-
-        neighbor_feats = self.node_features[neighbors]
-        node_feat = self.node_features[node_id].unsqueeze(0).expand_as(neighbor_feats)
-
-        sims = F.cosine_similarity(node_feat, neighbor_feats, dim=1)
-        sim_weights = (sims + 1.0) / 2.0
-        sim_sum = sim_weights.sum()
-        sim_weights = sim_weights / sim_sum if sim_sum > 0 else torch.ones_like(sim_weights)/len(sim_weights)
-
-        # Cache computed similarities
-        self.cache[node_id] = (neighbors, sim_weights)
-        return neighbors, sim_weights
-
-    def clear_cache(self):
-        self.cache.clear()
-
-def cached_weighted_sample_fn(colptr, row_data, index, num_neighbors,
-                              node_features, sim_cache: SimilarityCache,
-                              replace=False, directed=True):
-
-    device = node_features.device
-    index = index.to(device, dtype=torch.long)
-
-    samples = index.clone().tolist()
-    to_local_node = {nid.item(): i for i, nid in enumerate(index)}
-
-    rows, cols, edges = [], [], []
-
-    begin, end = 0, len(samples)
-
-    for ell, num_samples in enumerate(num_neighbors):
-        current_nodes = samples[begin:end]
-        batch_rows, batch_cols = [], []
-
-        for local_idx, w in enumerate(current_nodes):
-
-            neighbors, sim_weights = sim_cache.get_sim_weights(w)
-
-            if neighbors.numel() == 0:
-                continue
-
-            if num_samples < 0 or num_samples >= neighbors.size(0):
-                selected_neighbors = neighbors
-            else:
-                sampled_indices = torch.multinomial(sim_weights, num_samples, replacement=False)
-                selected_neighbors = neighbors[sampled_indices]
-
-            for neighbor in selected_neighbors:
-                neighbor_item = neighbor.item()
-                if neighbor_item not in to_local_node:
-                    to_local_node[neighbor_item] = len(samples)
-                    samples.append(neighbor_item)
-
-                batch_cols.append(begin + local_idx)
-                batch_rows.append(to_local_node[neighbor_item])
-
-        rows.extend(batch_rows)
-        cols.extend(batch_cols)
-
-        begin, end = end, len(samples)
-
-    samples = torch.tensor(samples, dtype=torch.long, device=device)
-    rows = torch.tensor(rows, dtype=torch.long, device=device)
-    cols = torch.tensor(cols, dtype=torch.long, device=device)
-    edges = torch.arange(len(rows), device=device)
-
-    return samples, rows, cols, edges"""
 
 def custom_weighted_sample_fn(colptr, row_data, index, num_neighbors,
                               node_features, replace=False, directed=True):

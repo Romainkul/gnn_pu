@@ -6,7 +6,7 @@ from typing import Tuple, List, Union
 
 
 ##############################################################################
-# Sparse Label Propagation
+# Label Propagation
 ##############################################################################
 class LabelPropagationLoss(nn.Module):
     """
@@ -84,10 +84,11 @@ class ContrastiveLoss(nn.Module):
         margin (float): Initial margin for negative pairs. This value is learnable.
         num_pairs (int): Number of node pairs to sample for computing the loss.
     """
-    def __init__(self, margin: float = 0.5):
+    def __init__(self, margin: float = 0.5, abl_inverse=False):
         super().__init__()
         # Use a raw margin parameter and map it to a positive value via softplus.
         self.raw_margin = nn.Parameter(torch.tensor(margin))
+        self.abl_inverse = abl_inverse
 
     def forward(self, embeddings: torch.Tensor, E: torch.Tensor, num_pairs: int) -> torch.Tensor:
         device = embeddings.device
@@ -111,7 +112,10 @@ class ContrastiveLoss(nn.Module):
             num_cls_pairs = cls_pair_indices.numel()
             if num_cls_pairs > 0:
                 weights = E[:, cls] + eps  # Sampling weights based on posterior.
-                pair_indices = torch.multinomial(1/weights, num_samples=2 * num_cls_pairs, replacement=True)
+                if not self.abl_inverse:
+                    pair_indices = torch.multinomial(1/weights, num_samples=2 * num_cls_pairs, replacement=True)
+                else:
+                    pair_indices = torch.multinomial(weights, num_samples=2 * num_cls_pairs, replacement=True)
                 pair_indices = pair_indices.view(-1, 2)
                 sampled_pairs_list.append(pair_indices)
 

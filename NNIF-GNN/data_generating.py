@@ -5,6 +5,7 @@ import random
 import warnings
 
 import numpy as np
+import pandas as pd
 import torch
 import torch_geometric.transforms as T
 from torch import Tensor
@@ -216,12 +217,8 @@ def get_common_dataset(dataset_name: str) -> Data:
     data = dataset[0]
     return data
 
-import pandas as pd
-import torch
-from torch_geometric.data import Data
-
 def get_elliptic_bitcoin(dataset_name: str,
-                         path: str = r"C:\Users\romai\Desktop\elliptic_bitcoin_dataset") -> Data:
+                         path: str = r"/content/drive/MyDrive/elliptic_bitcoin_dataset") -> Data:
     """
     Loads the Elliptic Bitcoin dataset and reindexes node indices to start from 0,
     without relying on CSV row ordering. Uses only pandas for all I/O.
